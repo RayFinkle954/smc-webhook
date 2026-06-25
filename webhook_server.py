@@ -19,7 +19,16 @@ client = TradingClient(
     paper=True
 )
 
-POSITION_PCT = 0.10  # 10% of equity per trade — matches strategy setting
+POSITION_PCT = 0.10
+
+# Crypto symbols: TradingView ticker → Alpaca symbol (slash format)
+CRYPTO_MAP = {
+    'BTCUSD':  'BTC/USD',
+    'ETHUSD':  'ETH/USD',
+    'SOLUSD':  'SOL/USD',
+    'AVAXUSD': 'AVAX/USD',
+    'XRPUSD':  'XRP/USD',
+}
 
 _PATTERN = re.compile(
     r'(LONG|SHORT) \| (\w+) \| Entry: ([\d.]+) \| SL: ([\d.]+) \| TP: ([\d.]+)'
@@ -62,27 +71,37 @@ def webhook():
     except Exception:
         pass  # No existing position — proceed
 
+    raw_symbol     = signal['symbol']
+    alpaca_symbol  = CRYPTO_MAP.get(raw_symbol, raw_symbol)
+    is_crypto      = raw_symbol in CRYPTO_MAP
+
     account = client.get_account()
     equity  = float(account.equity)
-    qty     = max(1, int((equity * POSITION_PCT) / signal['entry']))
     side    = OrderSide.BUY if signal['side'] == 'LONG' else OrderSide.SELL
 
-    log.info('Submitting %s %dx %s  entry=%.4f  SL=%.4f  TP=%.4f',
-             side.value.upper(), qty, signal['symbol'],
+    if is_crypto:
+        qty = round((equity * POSITION_PCT) / signal['entry'], 6)
+        tif = TimeInForce.GTC
+    else:
+        qty = max(1, int((equity * POSITION_PCT) / signal['entry']))
+        tif = TimeInForce.DAY
+
+    log.info('Submitting %s %s %s  entry=%.4f  SL=%.4f  TP=%.4f',
+             side.value.upper(), qty, alpaca_symbol,
              signal['entry'], signal['sl'], signal['tp'])
 
     req = MarketOrderRequest(
-        symbol        = signal['symbol'],
+        symbol        = alpaca_symbol,
         qty           = qty,
         side          = side,
-        time_in_force = TimeInForce.DAY,
+        time_in_force = tif,
         order_class   = OrderClass.BRACKET,
-        take_profit   = TakeProfitRequest(limit_price=round(signal['tp'], 4)),
-        stop_loss     = StopLossRequest(stop_price=round(signal['sl'], 4)),
+        take_profit   = TakeProfitRequest(limit_price=round(signal['tp'], 2)),
+        stop_loss     = StopLossRequest(stop_price=round(signal['sl'], 2)),
     )
     order = client.submit_order(req)
     log.info('Order submitted: %s', order.id)
-    return jsonify(status='ok', order_id=str(order.id), qty=qty, symbol=signal['symbol'])
+    return jsonify(status='ok', order_id=str(order.id), qty=qty, symbol=alpaca_symbol)
 
 
 @app.route('/health', methods=['GET'])
