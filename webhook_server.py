@@ -63,17 +63,17 @@ def webhook():
         log.warning('Could not parse alert: %s', body)
         return jsonify(error='Unrecognised alert format'), 400
 
+    raw_symbol    = signal['symbol']
+    alpaca_symbol = CRYPTO_MAP.get(raw_symbol, raw_symbol)
+    is_crypto     = raw_symbol in CRYPTO_MAP
+
     # Skip if already in a position for this symbol
     try:
-        client.get_open_position(signal['symbol'])
-        log.info('Position already open for %s — skipping', signal['symbol'])
+        client.get_open_position(alpaca_symbol)
+        log.info('Position already open for %s — skipping', alpaca_symbol)
         return jsonify(status='skipped', reason='position already open')
     except Exception:
         pass  # No existing position — proceed
-
-    raw_symbol     = signal['symbol']
-    alpaca_symbol  = CRYPTO_MAP.get(raw_symbol, raw_symbol)
-    is_crypto      = raw_symbol in CRYPTO_MAP
 
     account = client.get_account()
     equity  = float(account.equity)
@@ -90,18 +90,36 @@ def webhook():
              side.value.upper(), qty, alpaca_symbol,
              signal['entry'], signal['sl'], signal['tp'])
 
-    req = MarketOrderRequest(
-        symbol        = alpaca_symbol,
-        qty           = qty,
-        side          = side,
-        time_in_force = tif,
-        order_class   = OrderClass.BRACKET,
-        take_profit   = TakeProfitRequest(limit_price=round(signal['tp'], 2)),
-        stop_loss     = StopLossRequest(stop_price=round(signal['sl'], 2)),
-    )
-    order = client.submit_order(req)
-    log.info('Order submitted: %s', order.id)
-    return jsonify(status='ok', order_id=str(order.id), qty=qty, symbol=alpaca_symbol)
+    try:
+        req = MarketOrderRequest(
+            symbol        = alpaca_symbol,
+            qty           = qty,
+            side          = side,
+            time_in_force = tif,
+            order_class   = OrderClass.BRACKET,
+            take_profit   = TakeProfitRequest(limit_price=round(signal['tp'], 2)),
+            stop_loss     = StopLossRequest(stop_price=round(signal['sl'], 2)),
+        )
+        order = client.submit_order(req)
+        log.info('Order submitted: %s', order.id)
+        return jsonify(status='ok', order_id=str(order.id), qty=qty, symbol=alpaca_symbol)
+    except Exception as e:
+        log.error('Order failed: %s', e)
+        # Fallback: simple market order without bracket (crypto may not support bracket)
+        try:
+            req_simple = MarketOrderRequest(
+                symbol        = alpaca_symbol,
+                qty           = qty,
+                side          = side,
+                time_in_force = tif,
+            )
+            order = client.submit_order(req_simple)
+            log.info('Simple order submitted: %s', order.id)
+            return jsonify(status='ok', order_id=str(order.id), qty=qty,
+                           symbol=alpaca_symbol, note='bracket failed, used simple market order')
+        except Exception as e2:
+            log.error('Simple order also failed: %s', e2)
+            return jsonify(error=str(e2), bracket_error=str(e)), 500
 
 
 @app.route('/health', methods=['GET'])
