@@ -39,6 +39,11 @@ def parse_alert(msg: str):
     }
 
 
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify(status='ok', service='smc-webhook', endpoints=['/health', '/webhook'])
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     body = request.get_data(as_text=True)
