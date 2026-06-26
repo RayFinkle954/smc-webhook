@@ -91,35 +91,30 @@ def webhook():
              signal['entry'], signal['sl'], signal['tp'])
 
     try:
-        req = MarketOrderRequest(
-            symbol        = alpaca_symbol,
-            qty           = qty,
-            side          = side,
-            time_in_force = tif,
-            order_class   = OrderClass.BRACKET,
-            take_profit   = TakeProfitRequest(limit_price=round(signal['tp'], 2)),
-            stop_loss     = StopLossRequest(stop_price=round(signal['sl'], 2)),
-        )
-        order = client.submit_order(req)
-        log.info('Order submitted: %s', order.id)
-        return jsonify(status='ok', order_id=str(order.id), qty=qty, symbol=alpaca_symbol)
-    except Exception as e:
-        log.error('Order failed: %s', e)
-        # Fallback: simple market order without bracket (crypto may not support bracket)
-        try:
-            req_simple = MarketOrderRequest(
+        if is_crypto:
+            # Alpaca does not support bracket orders for crypto
+            req = MarketOrderRequest(
                 symbol        = alpaca_symbol,
                 qty           = qty,
                 side          = side,
                 time_in_force = tif,
             )
-            order = client.submit_order(req_simple)
-            log.info('Simple order submitted: %s', order.id)
-            return jsonify(status='ok', order_id=str(order.id), qty=qty,
-                           symbol=alpaca_symbol, note='bracket failed, used simple market order')
-        except Exception as e2:
-            log.error('Simple order also failed: %s', e2)
-            return jsonify(error=str(e2), bracket_error=str(e)), 500
+        else:
+            req = MarketOrderRequest(
+                symbol        = alpaca_symbol,
+                qty           = qty,
+                side          = side,
+                time_in_force = tif,
+                order_class   = OrderClass.BRACKET,
+                take_profit   = TakeProfitRequest(limit_price=round(signal['tp'], 2)),
+                stop_loss     = StopLossRequest(stop_price=round(signal['sl'], 2)),
+            )
+        order = client.submit_order(req)
+        log.info('Order submitted: %s', order.id)
+        return jsonify(status='ok', order_id=str(order.id), qty=qty, symbol=alpaca_symbol)
+    except Exception as e:
+        log.error('Order failed: %s', e)
+        return jsonify(error=str(e)), 500
 
 
 @app.route('/health', methods=['GET'])
