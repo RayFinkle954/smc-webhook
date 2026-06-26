@@ -19,7 +19,7 @@ client = TradingClient(
     paper=True
 )
 
-POSITION_PCT = 0.10
+POSITION_PCT = 0.05
 
 # Crypto symbols: TradingView ticker → Alpaca symbol (slash format)
 CRYPTO_MAP = {
