@@ -33,6 +33,7 @@ CRYPTO_MAP = {
 _PATTERN = re.compile(
     r'(LONG|SHORT) \| (\w+) \| Entry: ([\d.]+) \| SL: ([\d.]+) \| TP: ([\d.]+)'
 )
+_CLOSE_PATTERN = re.compile(r'CLOSE \| (\w+)')
 
 
 def parse_alert(msg: str):
@@ -57,6 +58,19 @@ def index():
 def webhook():
     body = request.get_data(as_text=True)
     log.info('Alert received: %s', body)
+
+    # Handle CLOSE signals (sent by Pine Script on exit)
+    close_match = _CLOSE_PATTERN.search(body.strip())
+    if close_match:
+        raw_symbol    = close_match.group(1)
+        alpaca_symbol = CRYPTO_MAP.get(raw_symbol, raw_symbol)
+        try:
+            client.close_position(alpaca_symbol)
+            log.info('Position closed: %s', alpaca_symbol)
+            return jsonify(status='ok', action='closed', symbol=alpaca_symbol)
+        except Exception as e:
+            log.error('Close failed: %s', e)
+            return jsonify(error=str(e)), 500
 
     signal = parse_alert(body)
     if not signal:
