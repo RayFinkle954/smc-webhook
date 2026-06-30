@@ -59,11 +59,16 @@ def webhook():
     body = request.get_data(as_text=True)
     log.info('Alert received: %s', body)
 
-    # Handle CLOSE signals (sent by Pine Script on exit)
+    # Handle CLOSE signals (sent by Pine Script on exit via strategy.exit alert_message)
     close_match = _CLOSE_PATTERN.search(body.strip())
     if close_match:
         raw_symbol    = close_match.group(1)
         alpaca_symbol = CRYPTO_MAP.get(raw_symbol, raw_symbol)
+        try:
+            client.get_open_position(alpaca_symbol)
+        except Exception:
+            log.info('No open position for %s — already closed by bracket or never opened', alpaca_symbol)
+            return jsonify(status='ok', action='already_closed', symbol=alpaca_symbol)
         try:
             client.close_position(alpaca_symbol)
             log.info('Position closed: %s', alpaca_symbol)
