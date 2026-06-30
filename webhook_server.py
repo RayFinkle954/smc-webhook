@@ -34,7 +34,6 @@ _PATTERN = re.compile(
     r'(LONG|SHORT) \| (\w+) \| Entry: ([\d.]+) \| SL: ([\d.]+) \| TP: ([\d.]+)'
 )
 _CLOSE_PATTERN = re.compile(r'CLOSE \| (\w+)')
-_TV_EXIT_PATTERN = re.compile(r'^(Long|Short)\s*(Exit)?\s*$', re.IGNORECASE)
 
 
 def parse_alert(msg: str):
@@ -78,9 +77,9 @@ def webhook():
             log.error('Close failed: %s', e)
             return jsonify(error=str(e)), 500
 
-    # Ignore default TradingView exit fill messages from alerts still on old script versions
-    if _TV_EXIT_PATTERN.search(body.strip()):
-        log.info('Ignoring default TV exit fill: %s', body)
+    # Any message without | delimiters is a raw order-fill name (e.g. "LX", "Long Exit") — ignore
+    if '|' not in body.strip():
+        log.info('Ignoring unstructured fill message: %s', body)
         return jsonify(status='ok', action='ignored'), 200
 
     signal = parse_alert(body)
