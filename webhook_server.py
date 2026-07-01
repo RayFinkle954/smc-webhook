@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import logging
 from flask import Flask, request, jsonify
 from alpaca.trading.client import TradingClient
@@ -30,10 +31,12 @@ CRYPTO_MAP = {
     'XRPUSD':  'XRP/USD',
 }
 
+# Strategy code is an optional leading token (e.g. "SMC", "EMAPB", "XEMAX2") so
+# alerts not yet updated with a strategy tag keep parsing exactly as before.
 _PATTERN = re.compile(
-    r'(LONG|SHORT) \| (\w+) \| Entry: ([\d.]+) \| SL: ([\d.]+) \| TP: ([\d.]+)'
+    r'(LONG|SHORT)\s*\|\s*(?:([A-Z0-9]{2,10})\s*\|\s*)?(\w+)\s*\|\s*Entry:\s*([\d.]+)\s*\|\s*SL:\s*([\d.]+)\s*\|\s*TP:\s*([\d.]+)'
 )
-_CLOSE_PATTERN = re.compile(r'CLOSE \| (\w+)')
+_CLOSE_PATTERN = re.compile(r'CLOSE\s*\|\s*(?:([A-Z0-9]{2,10})\s*\|\s*)?(\w+)')
 
 
 def parse_alert(msg: str):
@@ -41,12 +44,19 @@ def parse_alert(msg: str):
     if not m:
         return None
     return {
-        'side':   m.group(1),
-        'symbol': m.group(2),
-        'entry':  float(m.group(3)),
-        'sl':     float(m.group(4)),
-        'tp':     float(m.group(5)),
+        'side':     m.group(1),
+        'strategy': m.group(2),  # None for untagged/legacy alerts
+        'symbol':   m.group(3),
+        'entry':    float(m.group(4)),
+        'sl':       float(m.group(5)),
+        'tp':       float(m.group(6)),
     }
+
+
+def make_client_order_id(strategy: str, alpaca_symbol: str) -> str:
+    tag = strategy or 'LEGACY'
+    clean_symbol = alpaca_symbol.replace('/', '')
+    return f'{tag}-{clean_symbol}-{int(time.time())}'
 
 
 @app.route('/', methods=['GET'])
@@ -62,8 +72,9 @@ def webhook():
     # Handle CLOSE signals (sent by Pine Script on exit via strategy.exit alert_message)
     close_match = _CLOSE_PATTERN.search(body.strip())
     if close_match:
-        raw_symbol    = close_match.group(1)
-        alpaca_symbol = CRYPTO_MAP.get(raw_symbol, raw_symbol)
+        close_strategy = close_match.group(1)
+        raw_symbol     = close_match.group(2)
+        alpaca_symbol  = CRYPTO_MAP.get(raw_symbol, raw_symbol)
         try:
             client.get_open_position(alpaca_symbol)
         except Exception:
@@ -71,8 +82,8 @@ def webhook():
             return jsonify(status='ok', action='already_closed', symbol=alpaca_symbol)
         try:
             client.close_position(alpaca_symbol)
-            log.info('Position closed: %s', alpaca_symbol)
-            return jsonify(status='ok', action='closed', symbol=alpaca_symbol)
+            log.info('Position closed: %s (strategy=%s)', alpaca_symbol, close_strategy or 'LEGACY')
+            return jsonify(status='ok', action='closed', symbol=alpaca_symbol, strategy=close_strategy)
         except Exception as e:
             log.error('Close failed: %s', e)
             return jsonify(error=str(e)), 500
@@ -110,32 +121,36 @@ def webhook():
         qty = max(1, int((equity * POSITION_PCT) / signal['entry']))
         tif = TimeInForce.DAY
 
-    log.info('Submitting %s %s %s  entry=%.4f  SL=%.4f  TP=%.4f',
+    client_order_id = make_client_order_id(signal['strategy'], alpaca_symbol)
+
+    log.info('Submitting %s %s %s  entry=%.4f  SL=%.4f  TP=%.4f  client_order_id=%s',
              side.value.upper(), qty, alpaca_symbol,
-             signal['entry'], signal['sl'], signal['tp'])
+             signal['entry'], signal['sl'], signal['tp'], client_order_id)
 
     try:
         if is_crypto:
             # Alpaca does not support bracket orders for crypto
             req = MarketOrderRequest(
-                symbol        = alpaca_symbol,
-                qty           = qty,
-                side          = side,
-                time_in_force = tif,
+                symbol          = alpaca_symbol,
+                qty             = qty,
+                side            = side,
+                time_in_force   = tif,
+                client_order_id = client_order_id,
             )
         else:
             req = MarketOrderRequest(
-                symbol        = alpaca_symbol,
-                qty           = qty,
-                side          = side,
-                time_in_force = tif,
-                order_class   = OrderClass.BRACKET,
-                take_profit   = TakeProfitRequest(limit_price=round(signal['tp'], 2)),
-                stop_loss     = StopLossRequest(stop_price=round(signal['sl'], 2)),
+                symbol          = alpaca_symbol,
+                qty             = qty,
+                side            = side,
+                time_in_force   = tif,
+                order_class     = OrderClass.BRACKET,
+                take_profit     = TakeProfitRequest(limit_price=round(signal['tp'], 2)),
+                stop_loss       = StopLossRequest(stop_price=round(signal['sl'], 2)),
+                client_order_id = client_order_id,
             )
         order = client.submit_order(req)
-        log.info('Order submitted: %s', order.id)
-        return jsonify(status='ok', order_id=str(order.id), qty=qty, symbol=alpaca_symbol)
+        log.info('Order submitted: %s (client_order_id=%s)', order.id, client_order_id)
+        return jsonify(status='ok', order_id=str(order.id), client_order_id=client_order_id, qty=qty, symbol=alpaca_symbol)
     except Exception as e:
         log.error('Order failed: %s', e)
         return jsonify(error=str(e)), 500
