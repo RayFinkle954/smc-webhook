@@ -33,8 +33,12 @@ CRYPTO_MAP = {
 
 # Strategy code is an optional leading token (e.g. "SMC", "EMAPB", "XEMAX2") so
 # alerts not yet updated with a strategy tag keep parsing exactly as before.
+# Size is an optional trailing fraction (0-1) for strategies that compute their
+# own dynamic position size (e.g. volatility-managed sizing); strategies that
+# omit it keep the flat POSITION_PCT behavior unchanged.
 _PATTERN = re.compile(
     r'(LONG|SHORT)\s*\|\s*(?:([A-Z0-9]{2,10})\s*\|\s*)?(\w+)\s*\|\s*Entry:\s*([\d.]+)\s*\|\s*SL:\s*([\d.]+)\s*\|\s*TP:\s*([\d.]+)'
+    r'(?:\s*\|\s*Size:\s*([\d.]+))?'
 )
 _CLOSE_PATTERN = re.compile(r'CLOSE\s*\|\s*(?:([A-Z0-9]{2,10})\s*\|\s*)?(\w+)')
 
@@ -44,12 +48,13 @@ def parse_alert(msg: str):
     if not m:
         return None
     return {
-        'side':     m.group(1),
-        'strategy': m.group(2),  # None for untagged/legacy alerts
-        'symbol':   m.group(3),
-        'entry':    float(m.group(4)),
-        'sl':       float(m.group(5)),
-        'tp':       float(m.group(6)),
+        'side':          m.group(1),
+        'strategy':      m.group(2),  # None for untagged/legacy alerts
+        'symbol':        m.group(3),
+        'entry':         float(m.group(4)),
+        'sl':            float(m.group(5)),
+        'tp':            float(m.group(6)),
+        'size_fraction': float(m.group(7)) if m.group(7) else None,
     }
 
 
@@ -57,6 +62,13 @@ def make_client_order_id(strategy: str, alpaca_symbol: str) -> str:
     tag = strategy or 'LEGACY'
     clean_symbol = alpaca_symbol.replace('/', '')
     return f'{tag}-{clean_symbol}-{int(time.time())}'
+
+
+def position_symbol(alpaca_symbol: str) -> str:
+    """Alpaca's position lookup/close endpoints want crypto symbols without the
+    slash (e.g. 'SOLUSD'), while order submission wants the slash format
+    ('SOL/USD'). Equities have no slash either way, so this is a no-op for them."""
+    return alpaca_symbol.replace('/', '')
 
 
 @app.route('/', methods=['GET'])
@@ -75,13 +87,14 @@ def webhook():
         close_strategy = close_match.group(1)
         raw_symbol     = close_match.group(2)
         alpaca_symbol  = CRYPTO_MAP.get(raw_symbol, raw_symbol)
+        lookup_symbol  = position_symbol(alpaca_symbol)
         try:
-            client.get_open_position(alpaca_symbol)
+            client.get_open_position(lookup_symbol)
         except Exception:
             log.info('No open position for %s — already closed by bracket or never opened', alpaca_symbol)
             return jsonify(status='ok', action='already_closed', symbol=alpaca_symbol)
         try:
-            client.close_position(alpaca_symbol)
+            client.close_position(lookup_symbol)
             log.info('Position closed: %s (strategy=%s)', alpaca_symbol, close_strategy or 'LEGACY')
             return jsonify(status='ok', action='closed', symbol=alpaca_symbol, strategy=close_strategy)
         except Exception as e:
@@ -104,7 +117,7 @@ def webhook():
 
     # Skip if already in a position for this symbol
     try:
-        client.get_open_position(alpaca_symbol)
+        client.get_open_position(position_symbol(alpaca_symbol))
         log.info('Position already open for %s — skipping', alpaca_symbol)
         return jsonify(status='skipped', reason='position already open')
     except Exception:
@@ -114,18 +127,28 @@ def webhook():
     equity  = float(account.equity)
     side    = OrderSide.BUY if signal['side'] == 'LONG' else OrderSide.SELL
 
+    # Strategies that send a Size fraction (e.g. volatility-managed sizing)
+    # scale the flat POSITION_PCT by it; strategies that omit it are unaffected.
+    effective_pct = POSITION_PCT
+    if signal['size_fraction'] is not None:
+        effective_pct = POSITION_PCT * max(0.0, min(signal['size_fraction'], 1.0))
+
     if is_crypto:
-        qty = round((equity * POSITION_PCT) / signal['entry'], 6)
+        qty = round((equity * effective_pct) / signal['entry'], 6)
         tif = TimeInForce.GTC
     else:
-        qty = max(1, int((equity * POSITION_PCT) / signal['entry']))
+        qty = max(1, int((equity * effective_pct) / signal['entry']))
         tif = TimeInForce.DAY
+
+    if qty <= 0:
+        log.info('Computed qty <= 0 for %s (size_fraction=%s) — skipping', alpaca_symbol, signal['size_fraction'])
+        return jsonify(status='skipped', reason='qty <= 0 from size_fraction')
 
     client_order_id = make_client_order_id(signal['strategy'], alpaca_symbol)
 
-    log.info('Submitting %s %s %s  entry=%.4f  SL=%.4f  TP=%.4f  client_order_id=%s',
+    log.info('Submitting %s %s %s  entry=%.4f  SL=%.4f  TP=%.4f  size_fraction=%s  client_order_id=%s',
              side.value.upper(), qty, alpaca_symbol,
-             signal['entry'], signal['sl'], signal['tp'], client_order_id)
+             signal['entry'], signal['sl'], signal['tp'], signal['size_fraction'], client_order_id)
 
     try:
         if is_crypto:
