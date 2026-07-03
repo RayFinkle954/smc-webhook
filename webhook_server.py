@@ -6,9 +6,14 @@ from flask import Flask, request, jsonify
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.data.historical.stock import StockHistoricalDataClient
 from dotenv import load_dotenv
 
 import risk_manager
+import market_regime
+import streak_analysis
+import overnight_risk
+import cash_carry
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -20,6 +25,11 @@ client = TradingClient(
     os.environ['ALPACA_API_KEY'],
     os.environ['ALPACA_SECRET'],
     paper=True
+)
+
+data_client = StockHistoricalDataClient(
+    os.environ['ALPACA_API_KEY'],
+    os.environ['ALPACA_SECRET'],
 )
 
 POSITION_PCT = 0.05
@@ -140,6 +150,22 @@ def webhook():
     if signal['size_fraction'] is not None:
         effective_pct = POSITION_PCT * max(0.0, min(signal['size_fraction'], 1.0))
 
+    # Market-regime filter: reduce size across the board when SPY's daily ADX
+    # shows a choppy market (all these strategies lose money in chop). Fails
+    # open to a 1.0 multiplier if the data fetch errors, so a data hiccup
+    # never blocks trading outright.
+    regime_multiplier = market_regime.get_regime_multiplier(data_client)
+    effective_pct *= regime_multiplier
+    if regime_multiplier < 1.0:
+        log.info('Regime filter active: SPY ADX indicates chop, sizing at %.0f%%', regime_multiplier * 100)
+
+    # Winning/losing streak multiplier — only kicks in once a strategy has a
+    # full window of closed trades, so it can't chase noise on tiny samples.
+    streak_multiplier = streak_analysis.get_streak_multiplier(client, signal['strategy'])
+    effective_pct *= streak_multiplier
+    if streak_multiplier != 1.0:
+        log.info('Streak filter active for %s: sizing at %.0f%%', signal['strategy'], streak_multiplier * 100)
+
     if is_crypto:
         qty = round((equity * effective_pct) / signal['entry'], 6)
         tif = TimeInForce.GTC
@@ -201,6 +227,26 @@ def webhook():
 def health():
     acct = client.get_account()
     return jsonify(status='ok', equity=acct.equity, buying_power=acct.buying_power)
+
+
+@app.route('/risk/gap-check', methods=['GET', 'POST'])
+def gap_check():
+    """Closes any open equity position whose move vs. yesterday's close
+    exceeds 1.5x its ATR(14). No internal scheduler here — call this from an
+    external cron (e.g. the same cron-job.org account pinging /health) once
+    shortly after the 9:30 ET open."""
+    actions = overnight_risk.check_positions(client, data_client)
+    return jsonify(status='ok', checked_at=time.time(), actions=actions)
+
+
+@app.route('/risk/cash-carry', methods=['GET', 'POST'])
+def cash_carry_check():
+    """Deploys idle cash above the buffer into BIL (T-bills) once it exceeds
+    20% of equity. No internal scheduler — call from an external cron, e.g.
+    once daily. See cash_carry.py for what was deliberately left out of scope
+    (FX-carry ETFs, covered calls) and why."""
+    result = cash_carry.rebalance_idle_cash(client)
+    return jsonify(status='ok', checked_at=time.time(), result=result)
 
 
 if __name__ == '__main__':
