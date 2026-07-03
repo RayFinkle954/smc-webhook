@@ -138,7 +138,11 @@ def webhook():
         tif = TimeInForce.GTC
     else:
         qty = max(1, int((equity * effective_pct) / signal['entry']))
-        tif = TimeInForce.DAY
+        # GTC (was DAY): with DAY, bracket TP/SL legs expired at the close,
+        # leaving overnight positions unprotected — an AAPL TP was hit after
+        # its leg had expired and never filled. GTC keeps brackets working
+        # until they actually execute.
+        tif = TimeInForce.GTC
 
     if qty <= 0:
         log.info('Computed qty <= 0 for %s (size_fraction=%s) — skipping', alpaca_symbol, signal['size_fraction'])
