@@ -32,7 +32,23 @@ data_client = StockHistoricalDataClient(
     os.environ['ALPACA_SECRET'],
 )
 
-POSITION_PCT = 0.05
+# Per-strategy base position size, as a fraction of equity. Reallocated
+# 2026-07-03 away from the flat 5%-for-everyone baseline toward the sleeves
+# with the strongest backtested edge (BTC/ETH/SOL trend following) and away
+# from the ones with an unconfirmed or expiring edge (SMC has fired zero live
+# signals; EMA Pullback is scheduled for EOL 2026-08-03). Total base exposure
+# stays roughly flat (35% -> 36% summed) -- this is a reallocation, not new
+# leverage. See vault: Sessions/DeepSeek Evaluation Follow-up + Risk Controls.
+POSITION_PCT_BY_STRATEGY = {
+    'SMC':      0.03,
+    'EMAPB':    0.03,
+    'XEMAX2':   0.05,
+    'ORB':      0.04,
+    'SOLTREND': 0.07,
+    'BTCTREND': 0.08,
+    'ETHTREND': 0.06,
+}
+DEFAULT_POSITION_PCT = 0.05  # untagged/legacy alerts, or any strategy code not listed above
 
 # Crypto symbols: TradingView ticker → Alpaca symbol (slash format)
 CRYPTO_MAP = {
@@ -47,7 +63,7 @@ CRYPTO_MAP = {
 # alerts not yet updated with a strategy tag keep parsing exactly as before.
 # Size is an optional trailing fraction (0-1) for strategies that compute their
 # own dynamic position size (e.g. volatility-managed sizing); strategies that
-# omit it keep the flat POSITION_PCT behavior unchanged.
+# omit it keep their strategy's base_pct behavior unchanged.
 _PATTERN = re.compile(
     r'(LONG|SHORT)\s*\|\s*(?:([A-Z0-9]{2,10})\s*\|\s*)?(\w+)\s*\|\s*Entry:\s*([\d.]+)\s*\|\s*SL:\s*([\d.]+)\s*\|\s*TP:\s*([\d.]+)'
     r'(?:\s*\|\s*Size:\s*([\d.]+))?'
@@ -144,11 +160,13 @@ def webhook():
     equity  = float(account.equity)
     side    = OrderSide.BUY if signal['side'] == 'LONG' else OrderSide.SELL
 
+    base_pct = POSITION_PCT_BY_STRATEGY.get(signal['strategy'], DEFAULT_POSITION_PCT)
+
     # Strategies that send a Size fraction (e.g. volatility-managed sizing)
-    # scale the flat POSITION_PCT by it; strategies that omit it are unaffected.
-    effective_pct = POSITION_PCT
+    # scale their base_pct by it; strategies that omit it are unaffected.
+    effective_pct = base_pct
     if signal['size_fraction'] is not None:
-        effective_pct = POSITION_PCT * max(0.0, min(signal['size_fraction'], 1.0))
+        effective_pct = base_pct * max(0.0, min(signal['size_fraction'], 1.0))
 
     # Market-regime filter: reduce size across the board when SPY's daily ADX
     # shows a choppy market (all these strategies lose money in chop). Fails
