@@ -8,6 +8,8 @@ from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopL
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 from dotenv import load_dotenv
 
+import risk_manager
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger(__name__)
@@ -123,6 +125,11 @@ def webhook():
     except Exception:
         pass  # No existing position — proceed
 
+    book_ok, book_reason = risk_manager.check_book_risk(client)
+    if not book_ok:
+        log.warning('Order blocked by book-level risk control: %s', book_reason)
+        return jsonify(status='skipped', reason=book_reason)
+
     account = client.get_account()
     equity  = float(account.equity)
     side    = OrderSide.BUY if signal['side'] == 'LONG' else OrderSide.SELL
@@ -147,6 +154,13 @@ def webhook():
     if qty <= 0:
         log.info('Computed qty <= 0 for %s (size_fraction=%s) — skipping', alpaca_symbol, signal['size_fraction'])
         return jsonify(status='skipped', reason='qty <= 0 from size_fraction')
+
+    exposure_ok, exposure_reason = risk_manager.check_underlying_exposure(
+        client, alpaca_symbol, qty * signal['entry'], equity
+    )
+    if not exposure_ok:
+        log.warning('Order blocked by per-underlying exposure cap: %s', exposure_reason)
+        return jsonify(status='skipped', reason=exposure_reason)
 
     client_order_id = make_client_order_id(signal['strategy'], alpaca_symbol)
 

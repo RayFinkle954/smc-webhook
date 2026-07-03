@@ -1,0 +1,116 @@
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+STATE_PATH = Path(__file__).parent / "risk_state.json"
+
+DAILY_LOSS_LIMIT = 0.03      # flatten + block new entries for the rest of the day
+MONTHLY_LOSS_LIMIT = 0.08    # flatten + block new entries for the rest of the month
+PER_UNDERLYING_LIMIT = 0.02  # max notional exposure to one symbol, as a fraction of equity
+
+# NOTE: Render's filesystem is ephemeral — this state resets on every deploy/restart.
+# Acceptable today since deploys are infrequent, but a halt could theoretically be
+# "forgotten" by a redeploy that happens mid-halt. Revisit if that becomes a real risk.
+
+
+def _load_state() -> dict:
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        log.warning("risk_state.json unreadable, starting fresh")
+        return {}
+
+
+def _save_state(state: dict) -> None:
+    STATE_PATH.write_text(json.dumps(state))
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _this_month() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def flatten_all(client, reason: str) -> None:
+    log.warning("FLATTENING ALL POSITIONS — %s", reason)
+    try:
+        results = client.close_all_positions(cancel_orders=True)
+        log.warning("Flatten complete: %d position(s) closed", len(results))
+    except Exception as e:
+        log.error("Flatten failed: %s", e)
+
+
+def check_book_risk(client) -> tuple[bool, str]:
+    """Call once per incoming webhook, before submitting any new entry order.
+
+    Returns (allowed, reason). When not allowed, the caller should skip the
+    order but still let CLOSE signals through (reducing risk is always fine).
+    Flattens positions and persists a halt the moment a limit is breached, so
+    a single breach only triggers one round of flattening, not one per alert.
+    """
+    state = _load_state()
+    today = _today()
+    month = _this_month()
+
+    account = client.get_account()
+    equity = float(account.equity)
+    last_equity = float(account.last_equity) if account.last_equity else equity
+
+    # Roll monthly baseline forward on the first check of a new month.
+    if state.get("month_start_month") != month:
+        state["month_start_month"] = month
+        state["month_start_equity"] = equity
+        state.pop("monthly_halt_month", None)
+
+    if state.get("daily_halt_date") == today:
+        _save_state(state)
+        return False, "daily loss limit already hit today — no new entries until tomorrow"
+
+    if state.get("monthly_halt_month") == month:
+        _save_state(state)
+        return False, "monthly loss limit already hit this month — halted pending review"
+
+    daily_pnl_pct = (equity - last_equity) / last_equity if last_equity else 0.0
+    if daily_pnl_pct <= -DAILY_LOSS_LIMIT:
+        flatten_all(client, f"daily loss {daily_pnl_pct:.2%} <= -{DAILY_LOSS_LIMIT:.0%}")
+        state["daily_halt_date"] = today
+        _save_state(state)
+        return False, f"daily loss limit hit ({daily_pnl_pct:.2%}) — flattened, blocked for the rest of today"
+
+    month_start_equity = state.get("month_start_equity", equity)
+    monthly_pnl_pct = (equity - month_start_equity) / month_start_equity if month_start_equity else 0.0
+    if monthly_pnl_pct <= -MONTHLY_LOSS_LIMIT:
+        flatten_all(client, f"monthly loss {monthly_pnl_pct:.2%} <= -{MONTHLY_LOSS_LIMIT:.0%}")
+        state["monthly_halt_month"] = month
+        _save_state(state)
+        return False, f"monthly loss limit hit ({monthly_pnl_pct:.2%}) — flattened, halted pending review"
+
+    _save_state(state)
+    return True, "ok"
+
+
+def check_underlying_exposure(client, alpaca_symbol: str, new_notional: float, equity: float) -> tuple[bool, str]:
+    """Notional-exposure cap per symbol, as a fraction of equity. This is a
+    simplification of the "2% risk per underlying" idea from the strategy
+    review — it caps position size (qty * price), not stop-distance-adjusted
+    risk, because the latter would require tracking every open position's SL
+    across strategies. Revisit if a strategy starts using much wider stops
+    than the others, since notional alone would understate its real risk."""
+    try:
+        position = client.get_open_position(alpaca_symbol.replace("/", ""))
+        current_notional = abs(float(position.market_value)) if position.market_value else 0.0
+    except Exception:
+        current_notional = 0.0
+
+    projected = current_notional + new_notional
+    limit = equity * PER_UNDERLYING_LIMIT
+    if projected > limit:
+        return False, f"{alpaca_symbol} exposure would be ${projected:,.0f}, over the ${limit:,.0f} per-underlying cap"
+    return True, "ok"
