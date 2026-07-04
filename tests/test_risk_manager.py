@@ -1,9 +1,12 @@
+import os
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+os.environ.setdefault("ALPACA_API_KEY", "test")   # webhook_server (imported by the
+os.environ.setdefault("ALPACA_SECRET", "test")    # base-size regression test) needs these
 import risk_manager  # noqa: E402
 
 
@@ -86,25 +89,32 @@ class RiskManagerTest(unittest.TestCase):
         client = MagicMock()
         client.get_open_position.side_effect = Exception("no position")
         allowed, reason = risk_manager.check_underlying_exposure(
-            client, "AMD", new_notional=2500, equity=100000
+            client, "AMD", new_notional=10500, equity=100000
         )
-        self.assertFalse(allowed)  # 2500 > 2% of 100000 = 2000
-
-    def test_underlying_exposure_allows_under_cap(self):
-        client = MagicMock()
-        client.get_open_position.side_effect = Exception("no position")
-        allowed, reason = risk_manager.check_underlying_exposure(
-            client, "AMD", new_notional=1500, equity=100000
-        )
-        self.assertTrue(allowed)
+        self.assertFalse(allowed)  # 10500 > 10% of 100000 = 10000
 
     def test_underlying_exposure_accounts_for_existing_position(self):
         client = MagicMock()
-        client.get_open_position.return_value = FakePosition(market_value=1000)
+        client.get_open_position.return_value = FakePosition(market_value=6000)
         allowed, reason = risk_manager.check_underlying_exposure(
-            client, "AMD", new_notional=1500, equity=100000
+            client, "AMD", new_notional=5000, equity=100000
         )
-        self.assertFalse(allowed)  # 1000 existing + 1500 new = 2500 > 2000 cap
+        self.assertFalse(allowed)  # 6000 existing + 5000 new = 11000 > 10000 cap
+
+    def test_every_configured_base_size_passes_the_cap(self):
+        """Regression: the cap started life at 2%, BELOW the 3-8% per-strategy
+        base sizes, which would have silently blocked every live entry. The
+        cap must clear every configured base size even after the max streak
+        multiplier (1.2x), or it stops being a backstop and becomes a wall."""
+        import webhook_server
+        client = MagicMock()
+        client.get_open_position.side_effect = Exception("no position")
+        for code, base_pct in webhook_server.POSITION_PCT_BY_STRATEGY.items():
+            worst_case = base_pct * 1.2  # max streak multiplier
+            allowed, reason = risk_manager.check_underlying_exposure(
+                client, "TEST", new_notional=100000 * worst_case, equity=100000
+            )
+            self.assertTrue(allowed, f"{code} at {worst_case:.1%} blocked: {reason}")
 
 
 if __name__ == "__main__":

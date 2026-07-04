@@ -168,14 +168,18 @@ def webhook():
     if signal['size_fraction'] is not None:
         effective_pct = base_pct * max(0.0, min(signal['size_fraction'], 1.0))
 
-    # Market-regime filter: reduce size across the board when SPY's daily ADX
-    # shows a choppy market (all these strategies lose money in chop). Fails
-    # open to a 1.0 multiplier if the data fetch errors, so a data hiccup
-    # never blocks trading outright.
-    regime_multiplier = market_regime.get_regime_multiplier(data_client)
-    effective_pct *= regime_multiplier
-    if regime_multiplier < 1.0:
-        log.info('Regime filter active: SPY ADX indicates chop, sizing at %.0f%%', regime_multiplier * 100)
+    # Market-regime filter: reduce size when SPY's daily ADX shows a choppy
+    # market. Applies only to flat-sized strategies — the vol-managed sleeves
+    # (any alert carrying a Size fraction) already scale themselves to
+    # realized volatility, and stacking a second volatility derating on top
+    # would double-count the same signal (and SPY ADX is a poor chop proxy
+    # for 24/7 crypto regardless). Fails open to 1.0 on data errors, so a
+    # data hiccup never blocks trading outright.
+    if signal['size_fraction'] is None:
+        regime_multiplier = market_regime.get_regime_multiplier(data_client)
+        effective_pct *= regime_multiplier
+        if regime_multiplier < 1.0:
+            log.info('Regime filter active: SPY ADX indicates chop, sizing at %.0f%%', regime_multiplier * 100)
 
     # Winning/losing streak multiplier — only kicks in once a strategy has a
     # full window of closed trades, so it can't chase noise on tiny samples.

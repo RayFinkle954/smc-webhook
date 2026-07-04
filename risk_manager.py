@@ -9,7 +9,13 @@ STATE_PATH = Path(__file__).parent / "risk_state.json"
 
 DAILY_LOSS_LIMIT = 0.03      # flatten + block new entries for the rest of the day
 MONTHLY_LOSS_LIMIT = 0.08    # flatten + block new entries for the rest of the month
-PER_UNDERLYING_LIMIT = 0.02  # max notional exposure to one symbol, as a fraction of equity
+# Sanity backstop, not a sizing tool: must sit ABOVE the largest intended
+# single position or it silently blocks all trading. Max designed size is
+# BTCTREND 8% base x 1.2 streak multiplier = 9.6%, so 10% only trips on a
+# genuinely wrong order. (Was 0.02 at first deploy — below the 3-8% base
+# sizes, which would have blocked every entry; caught in review before any
+# live signal hit it.)
+PER_UNDERLYING_LIMIT = 0.10
 
 # NOTE: Render's filesystem is ephemeral — this state resets on every deploy/restart.
 # Acceptable today since deploys are infrequent, but a halt could theoretically be
@@ -30,12 +36,24 @@ def _save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state))
 
 
+def _market_now() -> datetime:
+    """Halt windows are defined in market time: a daily halt should last until
+    midnight ET, not midnight UTC (which is 8pm ET — early enough for the
+    24/7 crypto sleeves to re-enter the same evening). Falls back to UTC on
+    hosts without a tz database (e.g. Windows without the tzdata package)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return _market_now().strftime("%Y-%m-%d")
 
 
 def _this_month() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+    return _market_now().strftime("%Y-%m")
 
 
 def flatten_all(client, reason: str) -> None:

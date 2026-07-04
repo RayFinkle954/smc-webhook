@@ -41,6 +41,7 @@ class CheckPositionsTest(unittest.TestCase):
     def test_large_gap_closes_position(self):
         trading_client = MagicMock()
         trading_client.get_all_positions.return_value = [make_position('AMD', current_price=120, lastday_price=100)]
+        trading_client.get_orders.return_value = []
         data_client = MagicMock()
         bars = [make_bar(100.5, 99.5, 100) for _ in range(20)]  # ATR ~= 1.0, gap of 20 >> 1.5x ATR
         data_client.get_stock_bars.return_value.data = {'AMD': bars}
@@ -49,6 +50,41 @@ class CheckPositionsTest(unittest.TestCase):
 
         trading_client.close_position.assert_called_once_with('AMD')
         self.assertEqual(actions[0]['action'], 'closed')
+
+    def test_open_bracket_legs_cancelled_before_close(self):
+        """Regression: bracket TP/SL legs hold the position's qty — closing
+        without cancelling them first gets rejected by Alpaca."""
+        trading_client = MagicMock()
+        trading_client.get_all_positions.return_value = [make_position('AMD', current_price=120, lastday_price=100)]
+        leg = MagicMock()
+        leg.id = 'leg-1'
+        trading_client.get_orders.return_value = [leg]
+        call_order = []
+        trading_client.cancel_order_by_id.side_effect = lambda _id: call_order.append('cancel')
+        trading_client.close_position.side_effect = lambda _sym: call_order.append('close')
+        data_client = MagicMock()
+        bars = [make_bar(100.5, 99.5, 100) for _ in range(20)]
+        data_client.get_stock_bars.return_value.data = {'AMD': bars}
+
+        overnight_risk.check_positions(trading_client, data_client)
+
+        trading_client.cancel_order_by_id.assert_called_once_with('leg-1')
+        self.assertEqual(call_order, ['cancel', 'close'])
+
+    def test_carry_symbol_is_skipped_even_on_big_move(self):
+        """BIL sheds its distribution on ex-div dates — that must never read
+        as a gap-risk event."""
+        trading_client = MagicMock()
+        trading_client.get_all_positions.return_value = [
+            make_position(overnight_risk.CARRY_SYMBOL, current_price=91.0, lastday_price=91.5)
+        ]
+        data_client = MagicMock()
+
+        actions = overnight_risk.check_positions(trading_client, data_client)
+
+        trading_client.close_position.assert_not_called()
+        data_client.get_stock_bars.assert_not_called()
+        self.assertEqual(actions, [])
 
     def test_small_gap_leaves_position_open(self):
         trading_client = MagicMock()

@@ -2,7 +2,10 @@ import logging
 
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from alpaca.trading.enums import AssetClass
+from alpaca.trading.enums import AssetClass, QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
+
+from cash_carry import CARRY_SYMBOL
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +67,11 @@ def check_positions(trading_client, data_client) -> list[dict]:
     for position in positions:
         if position.asset_class == AssetClass.CRYPTO:
             continue
+        if position.symbol == CARRY_SYMBOL:
+            # BIL drops by its distribution every ex-dividend date — with a
+            # near-zero ATR that reads as a "gap" and would dump the whole
+            # T-bill sleeve over a payout, not a risk event.
+            continue
         if not position.current_price or not position.lastday_price:
             continue
 
@@ -79,6 +87,15 @@ def check_positions(trading_client, data_client) -> list[dict]:
 
         if gap > atr * GAP_ATR_MULTIPLIER:
             try:
+                # Equity positions here were opened as bracket orders, so the
+                # position's qty is held by the open TP/SL legs — Alpaca
+                # rejects a close on held qty. Cancel this symbol's open
+                # orders first, then close.
+                open_orders = trading_client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[position.symbol])
+                )
+                for order in open_orders:
+                    trading_client.cancel_order_by_id(order.id)
                 trading_client.close_position(position.symbol)
                 log.warning('Gap-risk exit: %s moved %.2f vs ATR %.2f (%.1fx) — closed',
                             position.symbol, gap, atr, gap / atr)
