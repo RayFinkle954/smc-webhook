@@ -237,6 +237,13 @@ def webhook():
         log.warning('Order blocked by per-underlying exposure cap: %s', exposure_reason)
         return jsonify(status='skipped', reason=exposure_reason)
 
+    bucket_ok, bucket_reason = risk_manager.check_crypto_beta_exposure(
+        client, alpaca_symbol, qty * signal['entry'], equity
+    )
+    if not bucket_ok:
+        log.warning('Order blocked by crypto-beta bucket cap: %s', bucket_reason)
+        return jsonify(status='skipped', reason=bucket_reason)
+
     client_order_id = make_client_order_id(signal['strategy'], alpaca_symbol)
 
     log.info('Submitting %s %s %s  entry=%.4f  SL=%.4f  TP=%.4f  size_fraction=%s  client_order_id=%s',

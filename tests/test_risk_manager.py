@@ -117,5 +117,66 @@ class RiskManagerTest(unittest.TestCase):
             self.assertTrue(allowed, f"{code} at {worst_case:.1%} blocked: {reason}")
 
 
+class CryptoBetaBucketTest(unittest.TestCase):
+    def test_bucket_blocks_over_cap(self):
+        client = MagicMock()
+        pos = MagicMock()
+        pos.symbol = "BTCUSD"
+        pos.market_value = "30000"
+        client.get_all_positions.return_value = [pos]
+        allowed, reason = risk_manager.check_crypto_beta_exposure(
+            client, "ETH/USD", new_notional=8000, equity=100000
+        )
+        self.assertFalse(allowed)  # 30000 + 8000 = 38000 > 35000 cap
+        self.assertIn("crypto-beta", reason)
+
+    def test_bucket_ignores_non_bucket_symbols(self):
+        client = MagicMock()
+        allowed, _ = risk_manager.check_crypto_beta_exposure(
+            client, "AMZN", new_notional=50000, equity=100000
+        )
+        self.assertTrue(allowed)
+        client.get_all_positions.assert_not_called()
+
+    def test_bucket_counts_equity_proxies(self):
+        """MSTR/COIN/CRCL count toward the bucket — they're 55-80% correlated
+        to BTC (measured 2026-07-14), so they're the same bet in a drawdown."""
+        client = MagicMock()
+        mstr = MagicMock()
+        mstr.symbol = "MSTR"
+        mstr.market_value = "20000"
+        coin = MagicMock()
+        coin.symbol = "COIN"
+        coin.market_value = "12000"
+        client.get_all_positions.return_value = [mstr, coin]
+        allowed, _ = risk_manager.check_crypto_beta_exposure(
+            client, "BTC/USD", new_notional=8000, equity=100000
+        )
+        self.assertFalse(allowed)  # 32000 proxies + 8000 = 40000 > 35000
+
+    def test_bucket_fails_open_on_api_error(self):
+        client = MagicMock()
+        client.get_all_positions.side_effect = RuntimeError("API down")
+        allowed, _ = risk_manager.check_crypto_beta_exposure(
+            client, "BTC/USD", new_notional=8000, equity=100000
+        )
+        self.assertTrue(allowed)
+
+    def test_cap_clears_all_configured_crypto_sleeves(self):
+        """Regression (same failure mode as the original 2% cap): the bucket
+        cap must sit above the SUM of every crypto-linked sleeve's base size,
+        or fully-deployed configured strategies get silently blocked."""
+        import webhook_server
+        crypto_strategies = {"BTCTREND", "ETHTREND", "SOLTREND", "XEMAX2"}
+        summed = sum(pct for code, pct in webhook_server.POSITION_PCT_BY_STRATEGY.items()
+                     if code in crypto_strategies)
+        # SMC trades COIN + MSTR, EMAPB trades CRCL — one base slot each
+        summed += webhook_server.POSITION_PCT_BY_STRATEGY["SMC"] * 2
+        summed += webhook_server.POSITION_PCT_BY_STRATEGY["EMAPB"]
+        self.assertLess(summed, risk_manager.CRYPTO_BETA_CAP,
+                        f"configured crypto-linked base sizes sum to {summed:.1%}, "
+                        f">= the {risk_manager.CRYPTO_BETA_CAP:.0%} bucket cap")
+
+
 if __name__ == "__main__":
     unittest.main()

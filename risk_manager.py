@@ -17,6 +17,23 @@ MONTHLY_LOSS_LIMIT = 0.08    # flatten + block new entries for the rest of the m
 # live signal hit it.)
 PER_UNDERLYING_LIMIT = 0.10
 
+# Symbols that live correlation analysis (2026-07-14, 6mo daily returns) shows
+# are effectively ONE crypto bet: BTC/ETH/SOL are 89-92% pairwise-correlated,
+# MSTR is 80% to BTC, COIN 72%, CRCL ~55%. The per-underlying cap can't see
+# this — a broad crypto drawdown hits all of them at once. Both slash and
+# no-slash forms included (orders use BTC/USD, the positions API uses BTCUSD).
+CRYPTO_BETA_SYMBOLS = {
+    'BTC/USD', 'ETH/USD', 'SOL/USD', 'BTCUSD', 'ETHUSD', 'SOLUSD',
+    'COIN', 'MSTR', 'CRCL',
+}
+# Backstop, not a sizing tool — same rule as PER_UNDERLYING_LIMIT: must sit
+# ABOVE the summed base sizes of every crypto-linked sleeve (BTCTREND 8 +
+# ETHTREND 6 + SOLTREND 7 + XEMAX2 2.5 + SMC COIN 3 + SMC MSTR 3 + EMAPB CRCL
+# 3 = 32.5%) or it silently blocks configured strategies — the exact failure
+# mode of the original 2% cap. It only trips on multiplier stacking or a
+# wrongly-sized order. Covered by a regression test against the real config.
+CRYPTO_BETA_CAP = 0.35
+
 # NOTE: Render's filesystem is ephemeral — this state resets on every deploy/restart.
 # Acceptable today since deploys are infrequent, but a halt could theoretically be
 # "forgotten" by a redeploy that happens mid-halt. Revisit if that becomes a real risk.
@@ -131,4 +148,30 @@ def check_underlying_exposure(client, alpaca_symbol: str, new_notional: float, e
     limit = equity * PER_UNDERLYING_LIMIT
     if projected > limit:
         return False, f"{alpaca_symbol} exposure would be ${projected:,.0f}, over the ${limit:,.0f} per-underlying cap"
+    return True, "ok"
+
+
+def check_crypto_beta_exposure(client, alpaca_symbol: str, new_notional: float, equity: float) -> tuple[bool, str]:
+    """Caps combined notional across the crypto-beta bucket (crypto sleeves +
+    their equity proxies). Only consulted for orders on bucket symbols; fails
+    open on API errors so a data hiccup never blocks trading outright."""
+    if alpaca_symbol not in CRYPTO_BETA_SYMBOLS and alpaca_symbol.replace("/", "") not in CRYPTO_BETA_SYMBOLS:
+        return True, "ok"
+
+    bucket_notional = 0.0
+    try:
+        for position in client.get_all_positions():
+            if position.symbol in CRYPTO_BETA_SYMBOLS or position.symbol.replace("/", "") in CRYPTO_BETA_SYMBOLS:
+                bucket_notional += abs(float(position.market_value))
+    except Exception as e:
+        log.error("Crypto-beta bucket check failed open: %s", e)
+        return True, "ok"
+
+    projected = bucket_notional + new_notional
+    limit = equity * CRYPTO_BETA_CAP
+    if projected > limit:
+        return False, (
+            f"crypto-beta bucket (BTC/ETH/SOL + COIN/MSTR/CRCL) would be "
+            f"${projected:,.0f}, over the ${limit:,.0f} cap ({CRYPTO_BETA_CAP:.0%} of equity)"
+        )
     return True, "ok"
