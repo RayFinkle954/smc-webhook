@@ -127,5 +127,21 @@ class SellBackTest(unittest.TestCase):
         client.submit_order.assert_not_called()
 
 
+class RunawaySweepAlarmTest(unittest.TestCase):
+    def test_alarm_fires_at_incident_levels(self):
+        # The real 7/6-7/14 state: $164.5K BIL on $100K equity (164% > 120% limit)
+        client = make_client(equity=100227.32, cash=-57456.30, carry_market_value=164586.20)
+        client.submit_order.return_value = MagicMock(id='sell-1')
+        result = cash_carry.rebalance_idle_cash(client)
+        self.assertIn('alarm', result)
+        self.assertIn('164', result['alarm'])
+
+    def test_no_alarm_at_normal_carry_levels(self):
+        client = make_client(equity=100000, cash=30000, carry_market_value=60000)  # 60% of equity
+        client.submit_order.return_value = MagicMock(id='buy-1')
+        result = cash_carry.rebalance_idle_cash(client)
+        self.assertNotIn('alarm', result)
+
+
 if __name__ == "__main__":
     unittest.main()

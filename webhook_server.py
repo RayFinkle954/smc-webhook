@@ -46,7 +46,11 @@ POSITION_PCT_BY_STRATEGY = {
     # first 8 closed trades. Runs at half size until the 2026-08-03 alert
     # expiration, then renew-or-kill with the fuller sample.
     'XEMAX2':   0.025,
-    'ORB':      0.04,
+    # ORB raised 4% -> 6% on 2026-07-14: best live sleeve (PF 12.97, 75% WR
+    # over its first 4 closed trades). Deliberately NOT the recommended 8%
+    # yet -- small sample; go to 8% only after ~15 closed trades if the PF
+    # holds. See vault: Sessions/Performance Review 4 + Execution Fixes.
+    'ORB':      0.06,
     'SOLTREND': 0.07,
     'BTCTREND': 0.08,
     'ETHTREND': 0.06,

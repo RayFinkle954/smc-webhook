@@ -10,6 +10,7 @@ CASH_DEPLOY_THRESHOLD = 0.20  # deploy idle cash once it exceeds this fraction o
 CASH_BUFFER = 0.10            # always keep at least this fraction of equity in cash
 CARRY_SYMBOL = 'BIL'          # SPDR 0-3 Month T-Bill ETF -- see scope note below
 MIN_ORDER_NOTIONAL = 100.00   # don't churn dust orders on tiny buffer drift
+CARRY_ALARM_MULT = 1.20       # BIL above this fraction of equity = runaway sweep, scream
 
 # SCOPE NOTE: the original recommendation this is based on also proposed
 # FX-carry ETFs (UUP/FXY/FXB) and covered-call writing. Deliberately left
@@ -64,18 +65,40 @@ def rebalance_idle_cash(trading_client) -> dict:
     if pending:
         return {'action': 'none', 'reason': f'{len(pending)} pending {CARRY_SYMBOL} order(s), cash not yet settled'}
 
+    # Runaway-sweep alarm: the 7/4-7/5 incident put $164.5K of BIL on $100K
+    # equity and nothing noticed for 8 days. The guards above should make a
+    # repeat impossible, but if BIL ever exceeds CARRY_ALARM_MULT x equity
+    # again, log at ERROR (visible in Render logs) and flag it in the cron's
+    # JSON response so it can't sit silent.
+    alarm = None
+    try:
+        carry_value = float(trading_client.get_open_position(CARRY_SYMBOL).market_value)
+    except Exception:
+        carry_value = 0.0
+    if carry_value > equity * CARRY_ALARM_MULT:
+        alarm = f'{CARRY_SYMBOL} at ${carry_value:,.0f} = {carry_value / equity:.0%} of equity (limit {CARRY_ALARM_MULT:.0%})'
+        log.error('CASH-CARRY ALARM: %s — runaway sweep, investigate immediately', alarm)
+
     buffer = equity * CASH_BUFFER
 
     if cash < buffer:
-        return _sell_back(trading_client, shortfall=round(buffer - cash, 2))
+        result = _sell_back(trading_client, shortfall=round(buffer - cash, 2))
+        if alarm:
+            result['alarm'] = alarm
+        return result
+
+    def with_alarm(result: dict) -> dict:
+        if alarm:
+            result['alarm'] = alarm
+        return result
 
     cash_pct = cash / equity
     if cash_pct <= CASH_DEPLOY_THRESHOLD:
-        return {'action': 'none', 'reason': f'cash at {cash_pct:.1%}, within {CASH_DEPLOY_THRESHOLD:.0%} threshold'}
+        return with_alarm({'action': 'none', 'reason': f'cash at {cash_pct:.1%}, within {CASH_DEPLOY_THRESHOLD:.0%} threshold'})
 
     deployable = round(cash - buffer, 2)
     if deployable < MIN_ORDER_NOTIONAL:
-        return {'action': 'none', 'reason': 'no deployable cash after buffer'}
+        return with_alarm({'action': 'none', 'reason': 'no deployable cash after buffer'})
 
     try:
         req = MarketOrderRequest(
@@ -87,10 +110,10 @@ def rebalance_idle_cash(trading_client) -> dict:
         )
         order = trading_client.submit_order(req)
         log.info('Cash-carry: deployed $%.2f into %s (order %s)', deployable, CARRY_SYMBOL, order.id)
-        return {'action': 'bought', 'symbol': CARRY_SYMBOL, 'notional': deployable, 'order_id': str(order.id)}
+        return with_alarm({'action': 'bought', 'symbol': CARRY_SYMBOL, 'notional': deployable, 'order_id': str(order.id)})
     except Exception as e:
         log.error('Cash-carry order failed: %s', e)
-        return {'action': 'failed', 'error': str(e)}
+        return with_alarm({'action': 'failed', 'error': str(e)})
 
 
 def _sell_back(trading_client, shortfall: float) -> dict:
