@@ -146,6 +146,26 @@ def webhook():
     alpaca_symbol = CRYPTO_MAP.get(raw_symbol, raw_symbol)
     is_crypto     = raw_symbol in CRYPTO_MAP
 
+    # Alpaca doesn't support shorting crypto — a SHORT on a crypto symbol acts
+    # only as a reversal exit: close any existing long, never open a short.
+    # (Every XEMAX2 SHORT used to reach submit_order, get rejected for selling
+    # coins the account didn't hold, and 500 — leaving TradingView's strategy
+    # state out of sync with the live book. Jul 8/9/14 in the alert log.)
+    if is_crypto and signal['side'] == 'SHORT':
+        lookup_symbol = position_symbol(alpaca_symbol)
+        try:
+            client.get_open_position(lookup_symbol)
+        except Exception:
+            log.info('Crypto SHORT for %s with no long open — ignored (shorts unsupported)', alpaca_symbol)
+            return jsonify(status='ok', action='ignored_crypto_short', symbol=alpaca_symbol)
+        try:
+            client.close_position(lookup_symbol)
+            log.info('Crypto SHORT treated as reversal exit: closed %s long', alpaca_symbol)
+            return jsonify(status='ok', action='closed_on_short_signal', symbol=alpaca_symbol)
+        except Exception as e:
+            log.error('Crypto reversal close failed for %s: %s', alpaca_symbol, e)
+            return jsonify(error=str(e)), 500
+
     # Skip if already in a position for this symbol
     try:
         client.get_open_position(position_symbol(alpaca_symbol))
