@@ -170,8 +170,9 @@ class CryptoBetaBucketTest(unittest.TestCase):
         crypto_strategies = {"BTCTREND", "ETHTREND", "SOLTREND", "XEMAX2"}
         summed = sum(pct for code, pct in webhook_server.POSITION_PCT_BY_STRATEGY.items()
                      if code in crypto_strategies)
-        # SMC trades COIN + MSTR, EMAPB trades CRCL — one base slot each
-        summed += webhook_server.POSITION_PCT_BY_STRATEGY["SMC"] * 2
+        # SMC trades MSTR (COIN pulled 2026-07-14, PF 0.945 under v3 filter),
+        # EMAPB trades CRCL — one base slot each
+        summed += webhook_server.POSITION_PCT_BY_STRATEGY["SMC"]
         summed += webhook_server.POSITION_PCT_BY_STRATEGY["EMAPB"]
         self.assertLess(summed, risk_manager.CRYPTO_BETA_CAP,
                         f"configured crypto-linked base sizes sum to {summed:.1%}, "

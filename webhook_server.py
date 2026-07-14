@@ -51,6 +51,11 @@ POSITION_PCT_BY_STRATEGY = {
     # yet -- small sample; go to 8% only after ~15 closed trades if the PF
     # holds. See vault: Sessions/Performance Review 4 + Execution Fixes.
     'ORB':      0.06,
+    # GAPGO deployed 2026-07-14 on META + AAPL only (5m, paper-first): the
+    # 27-week backtest re-run kept only those two (PF 7.8 / 7.5); NVDA and
+    # TSLA collapsed below 1.0 and were not deployed. Signals are rare
+    # (~1/month/ticker) -- start small, revisit after ~10 closed trades.
+    'GAPGO':    0.03,
     'SOLTREND': 0.07,
     'BTCTREND': 0.08,
     'ETHTREND': 0.06,
