@@ -42,7 +42,10 @@ data_client = StockHistoricalDataClient(
 POSITION_PCT_BY_STRATEGY = {
     'SMC':      0.03,
     'EMAPB':    0.03,
-    'XEMAX2':   0.05,
+    # XEMAX2 halved 5% -> 2.5% on 2026-07-14: live PF 0.73 / 25% WR over its
+    # first 8 closed trades. Runs at half size until the 2026-08-03 alert
+    # expiration, then renew-or-kill with the fuller sample.
+    'XEMAX2':   0.025,
     'ORB':      0.04,
     'SOLTREND': 0.07,
     'BTCTREND': 0.08,

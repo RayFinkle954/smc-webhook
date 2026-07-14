@@ -2,7 +2,7 @@ import logging
 
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from alpaca.trading.enums import AssetClass, QueryOrderStatus
+from alpaca.trading.enums import AssetClass, PositionSide, QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest
 
 from cash_carry import CARRY_SYMBOL
@@ -21,6 +21,14 @@ GAP_ATR_MULTIPLIER = 1.5
 # (same cron-job.org pattern as the existing /health keep-alive) since this
 # server has no internal scheduler — meant to run once shortly after the
 # 9:30 ET open.
+#
+# Only ADVERSE gaps trigger a close: long positions that gapped down, shorts
+# that gapped up. On 2026-07-13 the direction-blind version closed a winning
+# META long that had gapped UP 8% over the weekend — a favorable gap is the
+# strategy working, not an overnight risk event; the bracket TP/SL stays in
+# charge of harvesting it. Also beware cron timing: this ran at 11:19 ET that
+# day, so "gap" silently became "move since Friday's close" — keep the cron
+# pinned to ~9:35 ET.
 
 
 def _wilder_atr(highs: list[float], lows: list[float], closes: list[float], period: int) -> float | None:
@@ -79,7 +87,12 @@ def check_positions(trading_client, data_client) -> list[dict]:
         lastday = float(position.lastday_price)
         if lastday == 0:
             continue
-        gap = abs(current - lastday)
+        signed_gap = current - lastday
+        is_short = position.side == PositionSide.SHORT
+        adverse = signed_gap > 0 if is_short else signed_gap < 0
+        if not adverse:
+            continue
+        gap = abs(signed_gap)
 
         atr = _get_atr(data_client, position.symbol)
         if atr is None or atr == 0:
