@@ -249,6 +249,14 @@ def webhook():
         log.warning('Order blocked by crypto-beta bucket cap: %s', bucket_reason)
         return jsonify(status='skipped', reason=bucket_reason)
 
+    if is_crypto and side == OrderSide.BUY and signal['strategy'] not in cash_carry.CRYPTO_SLEEVE_SYMBOLS:
+        # Not a block: the order may still fill if settled cash happens to be
+        # there. But no reserve is being maintained for this sleeve, so its
+        # entries can fail on unsettled funds until it's registered in
+        # cash_carry.CRYPTO_SLEEVE_SYMBOLS.
+        log.error('Crypto sleeve %s missing from cash_carry.CRYPTO_SLEEVE_SYMBOLS — '
+                  'no settled-cash reserve is maintained for it', signal['strategy'])
+
     client_order_id = make_client_order_id(signal['strategy'], alpaca_symbol)
 
     log.info('Submitting %s %s %s  entry=%.4f  SL=%.4f  TP=%.4f  size_fraction=%s  client_order_id=%s',
@@ -303,10 +311,14 @@ def gap_check():
 @app.route('/risk/cash-carry', methods=['GET', 'POST'])
 def cash_carry_check():
     """Deploys idle cash above the buffer into BIL (T-bills) once it exceeds
-    20% of equity. No internal scheduler — call from an external cron, e.g.
+    the deploy threshold. The buffer is crypto-reserve-aware: passing the
+    sizing dict lets cash_carry keep settled cash on hand for whichever
+    crypto sleeves are currently flat (Alpaca crypto buys can't use T+1
+    unsettled BIL proceeds — see the 2026-07-14 incident note in
+    cash_carry.py). No internal scheduler — call from an external cron, e.g.
     once daily. See cash_carry.py for what was deliberately left out of scope
     (FX-carry ETFs, covered calls) and why."""
-    result = cash_carry.rebalance_idle_cash(client)
+    result = cash_carry.rebalance_idle_cash(client, POSITION_PCT_BY_STRATEGY)
     return jsonify(status='ok', checked_at=time.time(), result=result)
 
 

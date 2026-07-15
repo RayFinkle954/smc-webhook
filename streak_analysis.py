@@ -8,6 +8,8 @@ log = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 900  # trades are infrequent; no need to re-pull order history every webhook call
 STREAK_WINDOW = 5
+MULT_HOT = 1.2   # >60% win rate over the window; cash_carry's crypto reserve must cover this upsize
+MULT_COLD = 0.8  # <40% win rate
 
 _cache: dict = {}  # strategy_code -> {"multiplier": float, "fetched_at": ts}
 
@@ -90,9 +92,9 @@ def get_streak_multiplier(client, strategy_code: str | None, window: int = STREA
     else:
         win_rate = sum(1 for p in pnls if p > 0) / len(pnls)
         if win_rate > 0.6:
-            multiplier = 1.2
+            multiplier = MULT_HOT
         elif win_rate < 0.4:
-            multiplier = 0.8
+            multiplier = MULT_COLD
         else:
             multiplier = 1.0
 

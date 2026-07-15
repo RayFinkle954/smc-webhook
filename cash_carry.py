@@ -31,13 +31,97 @@ CARRY_ALARM_MULT = 1.20       # BIL above this fraction of equity = runaway swee
 # open, no pending CARRY_SYMBOL order may exist, and cash below the buffer
 # now sells BIL back instead of silently staying leveraged.
 
+# INCIDENT NOTE (2026-07-14): Alpaca crypto buys require SETTLED cash --
+# same-day BIL-sale proceeds are T+1 and don't count (the ETHTREND replay had
+# to be resized to 0.95x to fit). Worse, the weekly trend sleeves signal
+# Friday 20:00 ET, when the equity market is closed and BIL can't be sold at
+# all. A sell-back can therefore never fund a same-day crypto entry: the
+# settled cash has to already be there. Fix: the buffer below is dynamically
+# widened to reserve settled cash for every crypto sleeve that is currently
+# FLAT (a flat sleeve may fire a fresh entry at any time; a sleeve already in
+# a position won't need entry cash). The reserve shrinks back to the plain
+# CASH_BUFFER as crypto positions fill, so the drag only exists while entries
+# are actually possible. Because the reserve is maintained on every weekday
+# run, it is settled by the time a Friday-evening signal needs it.
+#
+# COST, quantified and accepted 2026-07-15: worst case (all four crypto
+# sleeves flat at once) the buffer holds ~29.6% of equity as raw settled cash
+# instead of BIL -- at ~4.5% T-bill yield that's ~1.3% of equity per year of
+# forgone carry, versus a missed/failed weekly trend entry, which the book is
+# built around. The drag self-heals as sleeves deploy.
 
-def rebalance_idle_cash(trading_client) -> dict:
-    """Keeps idle cash near CASH_BUFFER of equity using BIL as the parking
-    vehicle: deploys excess once cash exceeds CASH_DEPLOY_THRESHOLD, and sells
+# Crypto-trading sleeves and the (no-slash) Alpaca position symbol whose
+# presence means AT LEAST ONE sleeve mapped to it is deployed. Positions are
+# not attributed per strategy, so sleeves sharing a symbol (BTCTREND and
+# XEMAX2 both trade BTCUSD) are handled as a group in
+# crypto_cash_reserve_pct: when the shared symbol is held we still reserve
+# for the group's worst case -- every sleeve flat except the smallest.
+CRYPTO_SLEEVE_SYMBOLS = {
+    'BTCTREND': 'BTCUSD',
+    'ETHTREND': 'ETHUSD',
+    'SOLTREND': 'SOLUSD',
+    'XEMAX2':   'BTCUSD',
+}
+# A fresh entry can be upsized by the streak multiplier, so the reserve must
+# cover the LARGEST size the webhook can actually request, not the base size.
+# Regression-tested against streak_analysis.MULT_HOT (the regime multiplier
+# only ever derates, and size_fraction is capped at 1.0, so streak is the
+# only upsizer).
+MAX_ENTRY_UPSIZE = 1.2
+# On top of that: price drift between the signal price and the market fill.
+CRYPTO_RESERVE_SAFETY = 1.05
+# Deliberately small hysteresis above a widened buffer -- just enough that
+# daily equity drift doesn't churn tiny BIL orders. (NOT the original
+# 10-point buffer->deploy gap: that much headroom above the reserve would
+# idle up to 10 more points of equity out of BIL for no benefit.)
+DEPLOY_HYSTERESIS = 0.02
+
+
+def crypto_cash_reserve_pct(trading_client, position_pct_by_strategy):
+    """Fraction of equity to keep as settled cash for potential fresh crypto
+    entries, sized to the largest order the webhook can actually submit
+    (base size x max streak upsize x fill-drift margin). Sleeves are grouped
+    by position symbol: a held symbol proves only that SOME sleeve in the
+    group is deployed, so the group still reserves for its worst case --
+    everything flat except the smallest sleeve.
+
+    Returns None when positions can't be fetched: the caller must skip the
+    rebalance entirely rather than trade on unknown state (a reserve guessed
+    from a failed API call once meant a real BIL sell order on a blip)."""
+    if not position_pct_by_strategy:
+        return 0.0
+    try:
+        held = {p.symbol.replace('/', '') for p in trading_client.get_all_positions()}
+    except Exception as e:
+        log.error('Cash-carry: position fetch failed — skipping this rebalance: %s', e)
+        return None
+
+    needs_by_symbol: dict = {}
+    for code, symbol in CRYPTO_SLEEVE_SYMBOLS.items():
+        pct = position_pct_by_strategy.get(code)
+        if pct is not None:
+            need = pct * MAX_ENTRY_UPSIZE * CRYPTO_RESERVE_SAFETY
+            needs_by_symbol.setdefault(symbol, []).append(need)
+
+    reserve = 0.0
+    for symbol, needs in needs_by_symbol.items():
+        if symbol in held:
+            reserve += sum(needs) - min(needs)
+        else:
+            reserve += sum(needs)
+    return reserve
+
+
+def rebalance_idle_cash(trading_client, position_pct_by_strategy=None) -> dict:
+    """Keeps idle cash near the effective buffer using BIL as the parking
+    vehicle: deploys excess once cash exceeds the deploy threshold, and sells
     BIL back when cash has fallen below the buffer (e.g. strategies drew it
     down, or a past over-deployment left the account leveraged). Uses notional
-    (dollar-denominated) market orders so no price lookup is needed."""
+    (dollar-denominated) market orders so no price lookup is needed.
+
+    When the caller passes its per-strategy sizing dict, the buffer widens to
+    max(CASH_BUFFER, crypto reserve) so flat crypto sleeves always have
+    settled cash waiting -- see the 2026-07-14 incident note above."""
     try:
         clock = trading_client.get_clock()
     except Exception as e:
@@ -79,26 +163,33 @@ def rebalance_idle_cash(trading_client) -> dict:
         alarm = f'{CARRY_SYMBOL} at ${carry_value:,.0f} = {carry_value / equity:.0%} of equity (limit {CARRY_ALARM_MULT:.0%})'
         log.error('CASH-CARRY ALARM: %s — runaway sweep, investigate immediately', alarm)
 
-    buffer = equity * CASH_BUFFER
+    reserve_pct = crypto_cash_reserve_pct(trading_client, position_pct_by_strategy)
+    if reserve_pct is None:
+        result = {'action': 'none', 'reason': 'position fetch failed; skipping rebalance rather than trading on unknown state'}
+        if alarm:
+            result['alarm'] = alarm
+        return result
+    buffer_pct = max(CASH_BUFFER, reserve_pct)
+    deploy_threshold = max(CASH_DEPLOY_THRESHOLD, buffer_pct + DEPLOY_HYSTERESIS)
+    buffer = equity * buffer_pct
+
+    def annotate(result: dict) -> dict:
+        if alarm:
+            result['alarm'] = alarm
+        result['crypto_reserve_pct'] = round(reserve_pct, 4)
+        result['buffer_pct'] = round(buffer_pct, 4)
+        return result
 
     if cash < buffer:
-        result = _sell_back(trading_client, shortfall=round(buffer - cash, 2))
-        if alarm:
-            result['alarm'] = alarm
-        return result
-
-    def with_alarm(result: dict) -> dict:
-        if alarm:
-            result['alarm'] = alarm
-        return result
+        return annotate(_sell_back(trading_client, shortfall=round(buffer - cash, 2)))
 
     cash_pct = cash / equity
-    if cash_pct <= CASH_DEPLOY_THRESHOLD:
-        return with_alarm({'action': 'none', 'reason': f'cash at {cash_pct:.1%}, within {CASH_DEPLOY_THRESHOLD:.0%} threshold'})
+    if cash_pct <= deploy_threshold:
+        return annotate({'action': 'none', 'reason': f'cash at {cash_pct:.1%}, within {deploy_threshold:.0%} threshold'})
 
     deployable = round(cash - buffer, 2)
     if deployable < MIN_ORDER_NOTIONAL:
-        return with_alarm({'action': 'none', 'reason': 'no deployable cash after buffer'})
+        return annotate({'action': 'none', 'reason': 'no deployable cash after buffer'})
 
     try:
         req = MarketOrderRequest(
@@ -110,10 +201,10 @@ def rebalance_idle_cash(trading_client) -> dict:
         )
         order = trading_client.submit_order(req)
         log.info('Cash-carry: deployed $%.2f into %s (order %s)', deployable, CARRY_SYMBOL, order.id)
-        return with_alarm({'action': 'bought', 'symbol': CARRY_SYMBOL, 'notional': deployable, 'order_id': str(order.id)})
+        return annotate({'action': 'bought', 'symbol': CARRY_SYMBOL, 'notional': deployable, 'order_id': str(order.id)})
     except Exception as e:
         log.error('Cash-carry order failed: %s', e)
-        return with_alarm({'action': 'failed', 'error': str(e)})
+        return annotate({'action': 'failed', 'error': str(e)})
 
 
 def _sell_back(trading_client, shortfall: float) -> dict:
