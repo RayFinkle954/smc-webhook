@@ -122,12 +122,12 @@ class CryptoBetaBucketTest(unittest.TestCase):
         client = MagicMock()
         pos = MagicMock()
         pos.symbol = "BTCUSD"
-        pos.market_value = "30000"
+        pos.market_value = "35000"
         client.get_all_positions.return_value = [pos]
         allowed, reason = risk_manager.check_crypto_beta_exposure(
             client, "ETH/USD", new_notional=8000, equity=100000
         )
-        self.assertFalse(allowed)  # 30000 + 8000 = 38000 > 35000 cap
+        self.assertFalse(allowed)  # 35000 + 8000 = 43000 > 37000 cap
         self.assertIn("crypto-beta", reason)
 
     def test_bucket_ignores_non_bucket_symbols(self):
@@ -139,8 +139,10 @@ class CryptoBetaBucketTest(unittest.TestCase):
         client.get_all_positions.assert_not_called()
 
     def test_bucket_counts_equity_proxies(self):
-        """MSTR/COIN/CRCL count toward the bucket — they're 55-80% correlated
-        to BTC (measured 2026-07-14), so they're the same bet in a drawdown."""
+        """MSTR/COIN/CRCL/HOOD count toward the bucket — MSTR/COIN are 72-80%
+        correlated to BTC (measured 2026-07-14); HOOD joined 2026-07-15 with
+        its 6% ORB slot on 0.74-0.80 correlation to COIN (crypto-sector
+        sentiment), so they're the same bet in a drawdown."""
         client = MagicMock()
         mstr = MagicMock()
         mstr.symbol = "MSTR"
@@ -148,11 +150,14 @@ class CryptoBetaBucketTest(unittest.TestCase):
         coin = MagicMock()
         coin.symbol = "COIN"
         coin.market_value = "12000"
-        client.get_all_positions.return_value = [mstr, coin]
+        hood = MagicMock()
+        hood.symbol = "HOOD"
+        hood.market_value = "6000"
+        client.get_all_positions.return_value = [mstr, coin, hood]
         allowed, _ = risk_manager.check_crypto_beta_exposure(
             client, "BTC/USD", new_notional=8000, equity=100000
         )
-        self.assertFalse(allowed)  # 32000 proxies + 8000 = 40000 > 35000
+        self.assertFalse(allowed)  # 38000 proxies + 8000 = 46000 > 37000
 
     def test_bucket_fails_open_on_api_error(self):
         client = MagicMock()
@@ -171,9 +176,11 @@ class CryptoBetaBucketTest(unittest.TestCase):
         summed = sum(pct for code, pct in webhook_server.POSITION_PCT_BY_STRATEGY.items()
                      if code in crypto_strategies)
         # SMC trades MSTR (COIN pulled 2026-07-14, PF 0.945 under v3 filter),
-        # EMAPB trades CRCL — one base slot each
+        # EMAPB trades CRCL, ORB trades HOOD (bucket member since 2026-07-15)
+        # — one base slot each
         summed += webhook_server.POSITION_PCT_BY_STRATEGY["SMC"]
         summed += webhook_server.POSITION_PCT_BY_STRATEGY["EMAPB"]
+        summed += webhook_server.POSITION_PCT_BY_STRATEGY["ORB"]
         self.assertLess(summed, risk_manager.CRYPTO_BETA_CAP,
                         f"configured crypto-linked base sizes sum to {summed:.1%}, "
                         f">= the {risk_manager.CRYPTO_BETA_CAP:.0%} bucket cap")

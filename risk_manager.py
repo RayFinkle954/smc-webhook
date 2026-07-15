@@ -19,20 +19,26 @@ PER_UNDERLYING_LIMIT = 0.10
 
 # Symbols that live correlation analysis (2026-07-14, 6mo daily returns) shows
 # are effectively ONE crypto bet: BTC/ETH/SOL are 89-92% pairwise-correlated,
-# MSTR is 80% to BTC, COIN 72%, CRCL ~55%. The per-underlying cap can't see
-# this — a broad crypto drawdown hits all of them at once. Both slash and
-# no-slash forms included (orders use BTC/USD, the positions API uses BTCUSD).
+# MSTR is 80% to BTC, COIN 72%, CRCL ~55%. HOOD added 2026-07-15 after a
+# dedicated study (6/12mo daily returns): HOOD-BTC only 0.58-0.60, but
+# HOOD-COIN 0.74-0.80 — it trades on crypto-sector sentiment, same drawdown
+# exposure. The per-underlying cap can't see this — a broad crypto drawdown
+# hits all of them at once. Both slash and no-slash forms included (orders
+# use BTC/USD, the positions API uses BTCUSD).
 CRYPTO_BETA_SYMBOLS = {
     'BTC/USD', 'ETH/USD', 'SOL/USD', 'BTCUSD', 'ETHUSD', 'SOLUSD',
-    'COIN', 'MSTR', 'CRCL',
+    'COIN', 'MSTR', 'CRCL', 'HOOD',
 }
 # Backstop, not a sizing tool — same rule as PER_UNDERLYING_LIMIT: must sit
 # ABOVE the summed base sizes of every crypto-linked sleeve (BTCTREND 8 +
-# ETHTREND 6 + SOLTREND 7 + XEMAX2 2.5 + SMC COIN 3 + SMC MSTR 3 + EMAPB CRCL
-# 3 = 32.5%) or it silently blocks configured strategies — the exact failure
-# mode of the original 2% cap. It only trips on multiplier stacking or a
-# wrongly-sized order. Covered by a regression test against the real config.
-CRYPTO_BETA_CAP = 0.35
+# ETHTREND 6 + SOLTREND 7 + XEMAX2 2.5 + SMC MSTR 3 + EMAPB CRCL 3 + ORB HOOD
+# 6 = 35.5%) or it silently blocks configured strategies — the exact failure
+# mode of the original 2% cap. Raised 0.35 → 0.37 when HOOD joined the bucket
+# (user-approved 2026-07-15: full-weight inclusion per the correlation study,
+# cap stays just above the 35.5% summed base sizes). It only trips on
+# multiplier stacking or a wrongly-sized order. Covered by a regression test
+# against the real config.
+CRYPTO_BETA_CAP = 0.37
 
 # NOTE: Render's filesystem is ephemeral — this state resets on every deploy/restart.
 # Acceptable today since deploys are infrequent, but a halt could theoretically be
