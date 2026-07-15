@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+import incident_log
+
 log = logging.getLogger(__name__)
 
 STATE_PATH = Path(__file__).parent / "risk_state.json"
@@ -123,6 +125,11 @@ def check_book_risk(client) -> tuple[bool, str]:
         flatten_all(client, f"daily loss {daily_pnl_pct:.2%} <= -{DAILY_LOSS_LIMIT:.0%}")
         state["daily_halt_date"] = today
         _save_state(state)
+        incident_log.record(
+            "book_halt_daily",
+            f"daily loss limit hit ({daily_pnl_pct:.2%}) — flattened, blocked for the rest of today",
+            pnl_pct=round(daily_pnl_pct, 4),
+        )
         return False, f"daily loss limit hit ({daily_pnl_pct:.2%}) — flattened, blocked for the rest of today"
 
     month_start_equity = state.get("month_start_equity", equity)
@@ -131,6 +138,11 @@ def check_book_risk(client) -> tuple[bool, str]:
         flatten_all(client, f"monthly loss {monthly_pnl_pct:.2%} <= -{MONTHLY_LOSS_LIMIT:.0%}")
         state["monthly_halt_month"] = month
         _save_state(state)
+        incident_log.record(
+            "book_halt_monthly",
+            f"monthly loss limit hit ({monthly_pnl_pct:.2%}) — flattened, halted pending review",
+            pnl_pct=round(monthly_pnl_pct, 4),
+        )
         return False, f"monthly loss limit hit ({monthly_pnl_pct:.2%}) — flattened, halted pending review"
 
     _save_state(state)
@@ -181,3 +193,122 @@ def check_crypto_beta_exposure(client, alpaca_symbol: str, new_notional: float, 
             f"${projected:,.0f}, over the ${limit:,.0f} cap ({CRYPTO_BETA_CAP:.0%} of equity)"
         )
     return True, "ok"
+
+
+# --- Read-only status/reporting helpers -------------------------------------
+#
+# These back GET /risk/status. They intentionally do NOT reuse check_book_risk
+# directly: that function is an enforcement path (it flattens positions and
+# persists a halt the moment a breach is detected), so calling it from a
+# polling/reporting route would risk triggering a real flatten purely as a
+# side effect of someone checking the dashboard. Instead, each helper below
+# re-reads the same inputs (state file, account equity) and reuses the same
+# constants (DAILY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT, PER_UNDERLYING_LIMIT,
+# CRYPTO_BETA_CAP, CRYPTO_BETA_SYMBOLS) so the reported numbers can never
+# drift from the real enforcement logic above -- but never writes state,
+# never flattens, never places/cancels an order.
+
+
+def get_book_risk_status(client) -> dict:
+    """Read-only snapshot of current daily/monthly P&L vs. the halt
+    thresholds used by check_book_risk, and whether either halt is
+    currently active. Safe to call any number of times; never mutates
+    risk_state.json and never flattens positions."""
+    state = _load_state()
+    today = _today()
+    month = _this_month()
+
+    account = client.get_account()
+    equity = float(account.equity)
+    last_equity = float(account.last_equity) if account.last_equity else equity
+
+    daily_pnl_pct = (equity - last_equity) / last_equity if last_equity else 0.0
+
+    if state.get("month_start_month") == month:
+        month_start_equity = state.get("month_start_equity", equity)
+    else:
+        # No baseline seeded for the current month yet (first check_book_risk
+        # call of the month hasn't run) -- report 0% rather than comparing
+        # against a stale prior-month baseline.
+        month_start_equity = equity
+    monthly_pnl_pct = (equity - month_start_equity) / month_start_equity if month_start_equity else 0.0
+
+    def _pct_of_limit(pnl_pct: float, limit: float) -> float:
+        # limit is a positive fraction (e.g. 0.03); pnl_pct is negative as
+        # losses accrue. 0% when in profit or flat, 100% exactly at the
+        # threshold, >100% once past it (which is also when `halted` flips).
+        return round(max(0.0, pnl_pct / -limit), 4)
+
+    return {
+        "daily": {
+            "cap": "daily_loss_limit",
+            "current_pnl_pct": round(daily_pnl_pct, 4),
+            "limit_pct": -DAILY_LOSS_LIMIT,
+            "pct_of_limit_used": _pct_of_limit(daily_pnl_pct, DAILY_LOSS_LIMIT),
+            "halted": state.get("daily_halt_date") == today,
+        },
+        "monthly": {
+            "cap": "monthly_loss_limit",
+            "current_pnl_pct": round(monthly_pnl_pct, 4),
+            "limit_pct": -MONTHLY_LOSS_LIMIT,
+            "pct_of_limit_used": _pct_of_limit(monthly_pnl_pct, MONTHLY_LOSS_LIMIT),
+            "halted": state.get("monthly_halt_month") == month,
+        },
+    }
+
+
+def get_underlying_exposure_status(client, equity: float) -> list[dict]:
+    """Read-only per-position utilization against PER_UNDERLYING_LIMIT for
+    every currently-held position (mirrors check_underlying_exposure's
+    notional definition, abs(market_value), but reports every held symbol
+    instead of gating one hypothetical order). Sorted by utilization
+    descending. Returns [] (rather than raising) if positions can't be
+    fetched."""
+    limit = equity * PER_UNDERLYING_LIMIT
+    results = []
+    try:
+        positions = client.get_all_positions()
+    except Exception as e:
+        log.error("Underlying exposure status: position fetch failed: %s", e)
+        return results
+
+    for position in positions:
+        notional = abs(float(position.market_value)) if position.market_value else 0.0
+        results.append({
+            "symbol": position.symbol,
+            "cap": "per_underlying_limit",
+            "current_notional": round(notional, 2),
+            "limit_notional": round(limit, 2),
+            "limit_pct": PER_UNDERLYING_LIMIT,
+            "pct_of_limit_used": round(notional / limit, 4) if limit else 0.0,
+        })
+    results.sort(key=lambda r: r["pct_of_limit_used"], reverse=True)
+    return results
+
+
+def get_crypto_beta_status(client, equity: float) -> dict:
+    """Read-only combined notional across CRYPTO_BETA_SYMBOLS vs.
+    CRYPTO_BETA_CAP, with a per-symbol breakdown. Fails open the same way
+    check_crypto_beta_exposure does: an API error is reported as $0 bucket
+    notional rather than raised, so a status-page poll never errors out
+    because of a data hiccup."""
+    limit = equity * CRYPTO_BETA_CAP
+    bucket_notional = 0.0
+    members = []
+    try:
+        for position in client.get_all_positions():
+            if position.symbol in CRYPTO_BETA_SYMBOLS or position.symbol.replace("/", "") in CRYPTO_BETA_SYMBOLS:
+                value = abs(float(position.market_value)) if position.market_value else 0.0
+                bucket_notional += value
+                members.append({"symbol": position.symbol, "notional": round(value, 2)})
+    except Exception as e:
+        log.error("Crypto-beta status: position fetch failed: %s", e)
+
+    return {
+        "cap": "crypto_beta_bucket",
+        "current_notional": round(bucket_notional, 2),
+        "limit_notional": round(limit, 2),
+        "limit_pct": CRYPTO_BETA_CAP,
+        "pct_of_limit_used": round(bucket_notional / limit, 4) if limit else 0.0,
+        "members": members,
+    }

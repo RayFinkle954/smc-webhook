@@ -12,6 +12,7 @@ os.environ.setdefault("ALPACA_SECRET", "test")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cash_carry  # noqa: E402
+import incident_log  # noqa: E402
 
 
 def make_client(equity, cash, clock_open=True, pending_orders=(), carry_market_value=None,
@@ -276,6 +277,12 @@ class CryptoReserveTest(unittest.TestCase):
 
 
 class RunawaySweepAlarmTest(unittest.TestCase):
+    def setUp(self):
+        incident_log._incidents.clear()
+
+    def tearDown(self):
+        incident_log._incidents.clear()
+
     def test_alarm_fires_at_incident_levels(self):
         # The real 7/6-7/14 state: $164.5K BIL on $100K equity (164% > 120% limit)
         client = make_client(equity=100227.32, cash=-57456.30, carry_market_value=164586.20)
@@ -284,11 +291,18 @@ class RunawaySweepAlarmTest(unittest.TestCase):
         self.assertIn('alarm', result)
         self.assertIn('164', result['alarm'])
 
+        # The alarm must also be logged as an incident for /risk/incidents.
+        incidents = incident_log.get_incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]['kind'], 'cash_carry_alarm')
+        self.assertIn('164', incidents[0]['detail'])
+
     def test_no_alarm_at_normal_carry_levels(self):
         client = make_client(equity=100000, cash=30000, carry_market_value=60000)  # 60% of equity
         client.submit_order.return_value = MagicMock(id='buy-1')
         result = cash_carry.rebalance_idle_cash(client)
         self.assertNotIn('alarm', result)
+        self.assertEqual(incident_log.get_incidents(), [])
 
 
 if __name__ == "__main__":

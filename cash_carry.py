@@ -4,6 +4,8 @@ import time
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
 
+import incident_log
+
 log = logging.getLogger(__name__)
 
 CASH_DEPLOY_THRESHOLD = 0.20  # deploy idle cash once it exceeds this fraction of equity
@@ -162,6 +164,7 @@ def rebalance_idle_cash(trading_client, position_pct_by_strategy=None) -> dict:
     if carry_value > equity * CARRY_ALARM_MULT:
         alarm = f'{CARRY_SYMBOL} at ${carry_value:,.0f} = {carry_value / equity:.0%} of equity (limit {CARRY_ALARM_MULT:.0%})'
         log.error('CASH-CARRY ALARM: %s — runaway sweep, investigate immediately', alarm)
+        incident_log.record('cash_carry_alarm', alarm, carry_value=carry_value, equity=equity)
 
     reserve_pct = crypto_cash_reserve_pct(trading_client, position_pct_by_strategy)
     if reserve_pct is None:

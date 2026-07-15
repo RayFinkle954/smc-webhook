@@ -14,6 +14,7 @@ import market_regime
 import streak_analysis
 import overnight_risk
 import cash_carry
+import incident_log
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -240,6 +241,7 @@ def webhook():
     )
     if not exposure_ok:
         log.warning('Order blocked by per-underlying exposure cap: %s', exposure_reason)
+        incident_log.record('underlying_block', exposure_reason, symbol=alpaca_symbol)
         return jsonify(status='skipped', reason=exposure_reason)
 
     bucket_ok, bucket_reason = risk_manager.check_crypto_beta_exposure(
@@ -247,6 +249,7 @@ def webhook():
     )
     if not bucket_ok:
         log.warning('Order blocked by crypto-beta bucket cap: %s', bucket_reason)
+        incident_log.record('crypto_beta_block', bucket_reason, symbol=alpaca_symbol)
         return jsonify(status='skipped', reason=bucket_reason)
 
     if is_crypto and side == OrderSide.BUY and signal['strategy'] not in cash_carry.CRYPTO_SLEEVE_SYMBOLS:
@@ -305,6 +308,13 @@ def gap_check():
     external cron (e.g. the same cron-job.org account pinging /health) once
     shortly after the 9:30 ET open."""
     actions = overnight_risk.check_positions(client, data_client)
+    for a in actions:
+        if a.get('action') == 'closed':
+            incident_log.record(
+                'gap_check_close',
+                f"{a['symbol']} moved {a['gap']:.2f} vs ATR {a['atr']:.2f} — closed",
+                symbol=a['symbol'],
+            )
     return jsonify(status='ok', checked_at=time.time(), actions=actions)
 
 
@@ -320,6 +330,45 @@ def cash_carry_check():
     (FX-carry ETFs, covered calls) and why."""
     result = cash_carry.rebalance_idle_cash(client, POSITION_PCT_BY_STRATEGY)
     return jsonify(status='ok', checked_at=time.time(), result=result)
+
+
+@app.route('/risk/status', methods=['GET'])
+def risk_status():
+    """Read-only utilization snapshot against every live risk cap in
+    risk_manager.py: daily/monthly loss-halt distance, per-underlying
+    exposure for every held position, and the crypto-beta bucket total.
+    Pure reporting -- never places, cancels, or modifies an order, and never
+    writes state (see risk_manager.get_book_risk_status's docstring for why
+    it deliberately does NOT call check_book_risk, which is an enforcement
+    path that can flatten positions)."""
+    account = client.get_account()
+    equity = float(account.equity)
+
+    book = risk_manager.get_book_risk_status(client)
+    underlyings = risk_manager.get_underlying_exposure_status(client, equity)
+    crypto_beta = risk_manager.get_crypto_beta_status(client, equity)
+
+    return jsonify(
+        status='ok',
+        checked_at=time.time(),
+        equity=equity,
+        caps={
+            'daily_loss': book['daily'],
+            'monthly_loss': book['monthly'],
+            'per_underlying': underlyings,
+            'crypto_beta_bucket': crypto_beta,
+        },
+    )
+
+
+@app.route('/risk/incidents', methods=['GET'])
+def risk_incidents():
+    """Recent risk-control trip events (book-level halts, per-underlying
+    blocks, crypto-beta bucket blocks, gap-check adverse closes, cash-carry
+    runaway alarms), newest first. In-memory only since the last
+    deploy/restart -- see incident_log.py; Render's filesystem is ephemeral
+    so nothing here is persisted to disk."""
+    return jsonify(status='ok', checked_at=time.time(), incidents=incident_log.get_incidents())
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("ALPACA_API_KEY", "test")   # webhook_server (imported by the
 os.environ.setdefault("ALPACA_SECRET", "test")    # base-size regression test) needs these
 import risk_manager  # noqa: E402
+import incident_log  # noqa: E402
 
 
 class FakeAccount:
@@ -44,15 +45,24 @@ class RiskManagerTest(unittest.TestCase):
     def test_daily_loss_limit_flattens_and_blocks(self):
         client = MagicMock()
         client.get_account.return_value = FakeAccount(equity=96900, last_equity=100000)  # -3.1%
+        incident_log._incidents.clear()
         allowed, reason = risk_manager.check_book_risk(client)
         self.assertFalse(allowed)
         client.close_all_positions.assert_called_once_with(cancel_orders=True)
+
+        # The trip must be logged exactly once, as a book_halt_daily incident.
+        incidents = incident_log.get_incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]['kind'], 'book_halt_daily')
 
         # A second alert later the same day must not flatten again, just stay blocked.
         client.close_all_positions.reset_mock()
         allowed2, reason2 = risk_manager.check_book_risk(client)
         self.assertFalse(allowed2)
         client.close_all_positions.assert_not_called()
+        # ...and must not log a second incident for the same already-active halt.
+        self.assertEqual(len(incident_log.get_incidents()), 1)
+        incident_log._incidents.clear()
 
     def test_daily_loss_just_under_limit_allows(self):
         client = MagicMock()
@@ -68,10 +78,15 @@ class RiskManagerTest(unittest.TestCase):
         risk_manager.check_book_risk(client)
 
         # Now a big drop within daily tolerance but breaching the monthly limit.
+        incident_log._incidents.clear()
         client.get_account.return_value = FakeAccount(equity=91500, last_equity=91600)  # daily -0.1%, monthly -8.5%
         allowed, reason = risk_manager.check_book_risk(client)
         self.assertFalse(allowed)
         client.close_all_positions.assert_called_once_with(cancel_orders=True)
+        incidents = incident_log.get_incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]['kind'], 'book_halt_monthly')
+        incident_log._incidents.clear()
 
     def test_month_rollover_resets_baseline(self):
         client = MagicMock()
@@ -184,6 +199,106 @@ class CryptoBetaBucketTest(unittest.TestCase):
         self.assertLess(summed, risk_manager.CRYPTO_BETA_CAP,
                         f"configured crypto-linked base sizes sum to {summed:.1%}, "
                         f">= the {risk_manager.CRYPTO_BETA_CAP:.0%} bucket cap")
+
+
+class BookRiskStatusTest(unittest.TestCase):
+    """GET /risk/status must never call check_book_risk directly (that's an
+    enforcement path that can flatten positions); it uses this read-only
+    twin instead. These tests confirm it reads the same thresholds/state
+    without ever calling close_all_positions or writing risk_state.json."""
+
+    def setUp(self):
+        self.state_path = Path(__file__).parent / "_test_risk_state_status.json"
+        if self.state_path.exists():
+            self.state_path.unlink()
+        risk_manager.STATE_PATH = self.state_path
+        risk_manager._today = lambda: "2026-07-15"
+        risk_manager._this_month = lambda: "2026-07"
+
+    def tearDown(self):
+        if self.state_path.exists():
+            self.state_path.unlink()
+
+    def test_never_flattens_even_past_the_daily_threshold(self):
+        client = MagicMock()
+        client.get_account.return_value = FakeAccount(equity=96000, last_equity=100000)  # -4%, past the 3% cap
+        status = risk_manager.get_book_risk_status(client)
+        client.close_all_positions.assert_not_called()
+        self.assertFalse(self.state_path.exists())  # no state write either
+        self.assertEqual(status['daily']['limit_pct'], -risk_manager.DAILY_LOSS_LIMIT)
+        self.assertGreater(status['daily']['pct_of_limit_used'], 1.0)
+        self.assertFalse(status['daily']['halted'])  # not actually halted -- check_book_risk was never called
+
+    def test_reports_zero_utilization_in_profit(self):
+        client = MagicMock()
+        client.get_account.return_value = FakeAccount(equity=101000, last_equity=100000)  # +1%
+        status = risk_manager.get_book_risk_status(client)
+        self.assertEqual(status['daily']['pct_of_limit_used'], 0.0)
+
+    def test_reflects_an_already_active_halt(self):
+        client = MagicMock()
+        client.get_account.return_value = FakeAccount(equity=96900, last_equity=100000)
+        risk_manager.check_book_risk(client)  # actually trips the halt this time
+        incident_log._incidents.clear()
+
+        status = risk_manager.get_book_risk_status(client)
+        self.assertTrue(status['daily']['halted'])
+
+    def test_halfway_to_daily_limit_reports_fifty_percent(self):
+        client = MagicMock()
+        client.get_account.return_value = FakeAccount(equity=98500, last_equity=100000)  # -1.5% == half of -3%
+        status = risk_manager.get_book_risk_status(client)
+        self.assertAlmostEqual(status['daily']['pct_of_limit_used'], 0.5, places=4)
+
+
+class UnderlyingExposureStatusTest(unittest.TestCase):
+    def test_reports_utilization_for_every_held_position(self):
+        client = MagicMock()
+        amd = MagicMock(symbol="AMD", market_value="8000")
+        nvda = MagicMock(symbol="NVDA", market_value="3000")
+        client.get_all_positions.return_value = [amd, nvda]
+
+        results = risk_manager.get_underlying_exposure_status(client, equity=100000)
+
+        self.assertEqual(len(results), 2)
+        # Sorted descending by utilization: AMD (80% of the $10k cap) first.
+        self.assertEqual(results[0]['symbol'], 'AMD')
+        self.assertAlmostEqual(results[0]['pct_of_limit_used'], 0.8, places=4)
+        self.assertEqual(results[0]['limit_pct'], risk_manager.PER_UNDERLYING_LIMIT)
+        self.assertAlmostEqual(results[1]['pct_of_limit_used'], 0.3, places=4)
+
+    def test_no_positions_returns_empty_list(self):
+        client = MagicMock()
+        client.get_all_positions.return_value = []
+        self.assertEqual(risk_manager.get_underlying_exposure_status(client, equity=100000), [])
+
+    def test_position_fetch_failure_returns_empty_not_raises(self):
+        client = MagicMock()
+        client.get_all_positions.side_effect = RuntimeError("API down")
+        self.assertEqual(risk_manager.get_underlying_exposure_status(client, equity=100000), [])
+
+
+class CryptoBetaStatusTest(unittest.TestCase):
+    def test_sums_bucket_members_against_the_cap(self):
+        client = MagicMock()
+        btc = MagicMock(symbol="BTCUSD", market_value="20000")
+        mstr = MagicMock(symbol="MSTR", market_value="5000")
+        amzn = MagicMock(symbol="AMZN", market_value="9000")  # not in the bucket
+        client.get_all_positions.return_value = [btc, mstr, amzn]
+
+        status = risk_manager.get_crypto_beta_status(client, equity=100000)
+
+        self.assertEqual(status['current_notional'], 25000.0)
+        self.assertEqual(status['limit_pct'], risk_manager.CRYPTO_BETA_CAP)
+        self.assertAlmostEqual(status['pct_of_limit_used'], 25000 / (100000 * risk_manager.CRYPTO_BETA_CAP), places=4)
+        self.assertEqual({m['symbol'] for m in status['members']}, {'BTCUSD', 'MSTR'})
+
+    def test_fails_open_on_api_error(self):
+        client = MagicMock()
+        client.get_all_positions.side_effect = RuntimeError("API down")
+        status = risk_manager.get_crypto_beta_status(client, equity=100000)
+        self.assertEqual(status['current_notional'], 0.0)
+        self.assertEqual(status['members'], [])
 
 
 if __name__ == "__main__":
