@@ -60,6 +60,14 @@ POSITION_PCT_BY_STRATEGY = {
     'SOLTREND': 0.07,
     'BTCTREND': 0.08,
     'ETHTREND': 0.06,
+    # BTCMOM deployed 2026-07-22: TIS - BTC ESTRATEGIA Momentum + Confluencia
+    # (open-source TradingView community script, mariellangsaez), validated via
+    # real Strategy Tester (BTCUSD 4h, Dec 2020-Jul 2026: 47 trades, PF 3.655,
+    # Sharpe 0.257, CAGR 9.78%, max DD 6.83%). Sized equal to BTCTREND per
+    # explicit user instruction -- a lower-return/lower-drawdown complementary
+    # BTC sleeve, not a replacement. See vault: Algo Trading/_System/Candidate
+    # Pipeline.md and Validation/VAL-2026-07-22-community-strategy-validation.md.
+    'BTCMOM':   0.08,
 }
 DEFAULT_POSITION_PCT = 0.05  # untagged/legacy alerts, or any strategy code not listed above
 
