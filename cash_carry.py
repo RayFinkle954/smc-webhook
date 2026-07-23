@@ -55,14 +55,15 @@ CARRY_ALARM_MULT = 1.20       # BIL above this fraction of equity = runaway swee
 # Crypto-trading sleeves and the (no-slash) Alpaca position symbol whose
 # presence means AT LEAST ONE sleeve mapped to it is deployed. Positions are
 # not attributed per strategy, so sleeves sharing a symbol (BTCTREND and
-# XEMAX2 both trade BTCUSD) are handled as a group in
+# BTCMOM both trade BTCUSD) are handled as a group in
 # crypto_cash_reserve_pct: when the shared symbol is held we still reserve
 # for the group's worst case -- every sleeve flat except the smallest.
+# XEMAX2 removed 2026-07-23 -- killed (see webhook_server.py's
+# POSITION_PCT_BY_STRATEGY comment), no longer a live sleeve to reserve for.
 CRYPTO_SLEEVE_SYMBOLS = {
     'BTCTREND': 'BTCUSD',
     'ETHTREND': 'ETHUSD',
     'SOLTREND': 'SOLUSD',
-    'XEMAX2':   'BTCUSD',
     'BTCMOM':   'BTCUSD',
 }
 # A fresh entry can be upsized by the streak multiplier, so the reserve must

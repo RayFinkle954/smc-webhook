@@ -187,7 +187,14 @@ class CryptoBetaBucketTest(unittest.TestCase):
         cap must sit above the SUM of every crypto-linked sleeve's base size,
         or fully-deployed configured strategies get silently blocked."""
         import webhook_server
-        crypto_strategies = {"BTCTREND", "ETHTREND", "SOLTREND", "XEMAX2"}
+        # XEMAX2 removed 2026-07-23 (killed). NOTE: BTCMOM (added 2026-07-22,
+        # 8% base) was never added to this demo set either -- a pre-existing
+        # gap, not something introduced by the XEMAX2 removal; left as-is and
+        # flagged in the vault rather than expanded here, since this static
+        # mirror may not need to match risk_manager's real (dynamic,
+        # live-position-based) enforcement path exactly. See vault:
+        # Validation/VAL-2026-07-23-xemax2-kill-and-replacement.md.
+        crypto_strategies = {"BTCTREND", "ETHTREND", "SOLTREND"}
         summed = sum(pct for code, pct in webhook_server.POSITION_PCT_BY_STRATEGY.items()
                      if code in crypto_strategies)
         # SMC trades MSTR (COIN pulled 2026-07-14, PF 0.945 under v3 filter),

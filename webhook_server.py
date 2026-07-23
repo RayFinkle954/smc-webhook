@@ -44,10 +44,16 @@ data_client = StockHistoricalDataClient(
 POSITION_PCT_BY_STRATEGY = {
     'SMC':      0.03,
     'EMAPB':    0.03,
-    # XEMAX2 halved 5% -> 2.5% on 2026-07-14: live PF 0.73 / 25% WR over its
-    # first 8 closed trades. Runs at half size until the 2026-08-03 alert
-    # expiration, then renew-or-kill with the fuller sample.
-    'XEMAX2':   0.025,
+    # XEMAX2 KILLED 2026-07-23, ahead of its scheduled 2026-08-03 renew-or-kill
+    # review: the fuller live sample (13 closed trades) came back worse, not
+    # better -- PF ~0.60, 15.4% WR, cumulative -$132. Its own current
+    # TradingView backtest confirms this wasn't just live noise: PF 0.756/
+    # 35.29% WR over the last ~4 months, and only 0.749-0.957 over its whole
+    # available history back to 2020/2024 -- never a real edge, not a recent
+    # regime shift. TradingView alert deleted same day. Entry removed here as
+    # defense-in-depth (no alert means no new signals regardless). See vault:
+    # Validation/VAL-2026-07-23-xemax2-kill-and-replacement.md,
+    # Strategies/Crypto EMA Cross v2.md, Candidate Pipeline.md.
     # ORB raised 4% -> 6% on 2026-07-14: best live sleeve (PF 12.97, 75% WR
     # over its first 4 closed trades). Deliberately NOT the recommended 8%
     # yet -- small sample; go to 8% only after ~15 closed trades if the PF
