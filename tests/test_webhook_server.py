@@ -11,6 +11,7 @@ os.environ.setdefault("ALPACA_SECRET", "test")
 import webhook_server  # noqa: E402
 import risk_manager  # noqa: E402
 import incident_log  # noqa: E402
+from alpaca.common.exceptions import APIError  # noqa: E402
 
 
 class FakeAccount:
@@ -179,6 +180,86 @@ class IncidentLoggingAtCallSitesTest(unittest.TestCase):
             resp = webhook_server.app.test_client().get('/risk/gap-check')
 
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(incident_log.get_incidents(), [])
+
+
+class ShortNotAllowedTest(unittest.TestCase):
+    """2026-07-23 incident: Alpaca rejected a new equity short with
+    'account is not allowed to short' (error code 40310000), and the webhook's
+    bare 500 response made TradingView retry the identical doomed request
+    every ~5s (dozens of hits in the Render logs for one alert). This must
+    degrade to a clean skip + incident log entry instead."""
+
+    def setUp(self):
+        incident_log._incidents.clear()
+
+    def tearDown(self):
+        incident_log._incidents.clear()
+
+    def _short_rejected_client(self):
+        mock_client = MagicMock()
+        mock_client.get_open_position.side_effect = Exception('no position')
+        mock_client.get_account.return_value = FakeAccount(equity=100000)
+        mock_client.submit_order.side_effect = APIError(
+            '{"code": 40310000, "message": "account is not allowed to short"}'
+        )
+        return mock_client
+
+    def test_short_not_allowed_returns_clean_skip_not_500(self):
+        mock_client = self._short_rejected_client()
+
+        with patch.object(webhook_server, 'client', mock_client), \
+             patch.object(risk_manager, 'check_book_risk', return_value=(True, 'ok')), \
+             patch.object(risk_manager, 'check_underlying_exposure', return_value=(True, 'ok')), \
+             patch.object(risk_manager, 'check_crypto_beta_exposure', return_value=(True, 'ok')):
+            resp = webhook_server.app.test_client().post(
+                '/webhook',
+                data='SHORT | GAPGO | AAPL | Entry: 319.56 | SL: 323.18 | TP: 312.32',
+                content_type='text/plain',
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data['status'], 'skipped')
+        self.assertEqual(data['reason'], 'account not allowed to short')
+
+    def test_short_not_allowed_logs_incident(self):
+        mock_client = self._short_rejected_client()
+
+        with patch.object(webhook_server, 'client', mock_client), \
+             patch.object(risk_manager, 'check_book_risk', return_value=(True, 'ok')), \
+             patch.object(risk_manager, 'check_underlying_exposure', return_value=(True, 'ok')), \
+             patch.object(risk_manager, 'check_crypto_beta_exposure', return_value=(True, 'ok')):
+            webhook_server.app.test_client().post(
+                '/webhook',
+                data='SHORT | GAPGO | AAPL | Entry: 319.56 | SL: 323.18 | TP: 312.32',
+                content_type='text/plain',
+            )
+
+        incidents = incident_log.get_incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]['kind'], 'short_not_allowed')
+        self.assertEqual(incidents[0]['symbol'], 'AAPL')
+
+    def test_other_api_errors_still_return_500(self):
+        """Only the specific 40310000 code degrades gracefully -- any other
+        Alpaca rejection must still surface loudly as a real error."""
+        mock_client = self._short_rejected_client()
+        mock_client.submit_order.side_effect = APIError(
+            '{"code": 40010001, "message": "insufficient buying power"}'
+        )
+
+        with patch.object(webhook_server, 'client', mock_client), \
+             patch.object(risk_manager, 'check_book_risk', return_value=(True, 'ok')), \
+             patch.object(risk_manager, 'check_underlying_exposure', return_value=(True, 'ok')), \
+             patch.object(risk_manager, 'check_crypto_beta_exposure', return_value=(True, 'ok')):
+            resp = webhook_server.app.test_client().post(
+                '/webhook',
+                data='SHORT | GAPGO | AAPL | Entry: 319.56 | SL: 323.18 | TP: 312.32',
+                content_type='text/plain',
+            )
+
+        self.assertEqual(resp.status_code, 500)
         self.assertEqual(incident_log.get_incidents(), [])
 
 

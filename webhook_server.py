@@ -7,6 +7,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.common.exceptions import APIError
 from dotenv import load_dotenv
 
 import risk_manager
@@ -298,6 +299,25 @@ def webhook():
         order = client.submit_order(req)
         log.info('Order submitted: %s (client_order_id=%s)', order.id, client_order_id)
         return jsonify(status='ok', order_id=str(order.id), client_order_id=client_order_id, qty=qty, symbol=alpaca_symbol)
+    except APIError as e:
+        # 40310000 = "account is not allowed to short" -- a deterministic
+        # account-permission rejection (e.g. shorting/margin disabled), not a
+        # transient error. Returning 500 here made TradingView retry the exact
+        # same doomed request every ~5s (2026-07-23 incident: a single GAPGO
+        # AAPL short alert produced dozens of identical failures in the Render
+        # logs). Acknowledge cleanly instead so TradingView stops retrying,
+        # and log to incident_log so it surfaces in the dashboard rather than
+        # only in raw server logs.
+        try:
+            error_code = e.code
+        except Exception:
+            error_code = None
+        if side == OrderSide.SELL and error_code == 40310000:
+            log.warning('Short entry rejected (account not allowed to short): %s %s', alpaca_symbol, e)
+            incident_log.record('short_not_allowed', str(e), symbol=alpaca_symbol)
+            return jsonify(status='skipped', reason='account not allowed to short', symbol=alpaca_symbol)
+        log.error('Order failed: %s', e)
+        return jsonify(error=str(e)), 500
     except Exception as e:
         log.error('Order failed: %s', e)
         return jsonify(error=str(e)), 500
