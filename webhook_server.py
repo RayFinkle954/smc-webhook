@@ -75,6 +75,19 @@ POSITION_PCT_BY_STRATEGY = {
     # BTC sleeve, not a replacement. See vault: Algo Trading/_System/Candidate
     # Pipeline.md and Validation/VAL-2026-07-22-community-strategy-validation.md.
     'BTCMOM':   0.08,
+    # BTCGX deployed 2026-07-24 as a paper-test replacement candidate for
+    # XEMAX2's killed slot: classic 20/50 SMA daily golden-cross trend
+    # follower. Real TradingView Strategy Tester, BTCUSD 1D, full history
+    # 2011-2026 (fixed $100K notional per trade, non-compounding): 58 trades,
+    # PF 10.09, 45.6% WR, max DD only 3.56%, both the 2011-2020 and 2020-2026
+    # halves independently profitable. Sized conservatively at 3% (below
+    # BTCTREND/BTCMOM's 8%) because it is unproven live and its most recent
+    # 5 closed trades (Jan-Jul 2026) were all losses -- expected behavior for
+    # a slow trend-follower during BTC's post-Oct-2025 topping/decline, not
+    # necessarily a broken edge, but reason enough to size it small until it
+    # proves out on real paper fills. See vault: Validation/
+    # VAL-2026-07-23-xemax2-kill-and-replacement.md.
+    'BTCGX':    0.03,
 }
 DEFAULT_POSITION_PCT = 0.05  # untagged/legacy alerts, or any strategy code not listed above
 

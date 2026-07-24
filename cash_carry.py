@@ -65,6 +65,7 @@ CRYPTO_SLEEVE_SYMBOLS = {
     'ETHTREND': 'ETHUSD',
     'SOLTREND': 'SOLUSD',
     'BTCMOM':   'BTCUSD',
+    'BTCGX':    'BTCUSD',
 }
 # A fresh entry can be upsized by the streak multiplier, so the reserve must
 # cover the LARGEST size the webhook can actually request, not the base size.

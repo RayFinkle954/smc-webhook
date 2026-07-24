@@ -195,19 +195,20 @@ class CryptoReserveTest(unittest.TestCase):
 
     def test_reserve_shrinks_when_crypto_sleeves_are_deployed(self):
         """All three trend symbols held: ETH/SOL sleeves are proven deployed
-        (unique symbols), but the BTC group (BTCTREND+BTCMOM, since XEMAX2 was
-        killed 2026-07-23) keeps its worst-case flat member reserved since
-        positions aren't attributed per strategy. 15% cash sits above that
-        buffer -> no action. (BTCTREND and BTCMOM are equal-sized (8% each),
-        so the group's worst-case reserve collapses back to a single member's
-        contribution -- same ~10.08% buffer this test used before BTCMOM/
-        XEMAX2 ever existed as a 3-member group.)"""
+        (unique symbols), but the BTC group (BTCTREND+BTCMOM+BTCGX, since
+        XEMAX2 was killed 2026-07-23 and BTCGX deployed 2026-07-24) keeps its
+        worst-case flat member reserved since positions aren't attributed per
+        strategy. 22% cash sits above that buffer -> no action. (The group's
+        worst-case reserve is sum-minus-smallest -- BTCGX at 3% is smallest,
+        so BTCTREND+BTCMOM's combined 16% (needed = 1.26x -> ~20.16%) stays
+        reserved -- cash bumped 15%->22% from the 2-member-group test value
+        since adding BTCGX raised the reserve requirement above the old 15%.)"""
         import webhook_server
         sizing = webhook_server.POSITION_PCT_BY_STRATEGY
-        client = make_client(equity=100000, cash=15000, carry_market_value=60000,
+        client = make_client(equity=100000, cash=22000, carry_market_value=60000,
                              position_symbols=('BTCUSD', 'ETHUSD', 'SOLUSD', 'BIL'))
         result = cash_carry.rebalance_idle_cash(client, sizing)
-        btc_group = [self._need(sizing['BTCTREND']), self._need(sizing['BTCMOM'])]
+        btc_group = [self._need(sizing['BTCTREND']), self._need(sizing['BTCMOM']), self._need(sizing['BTCGX'])]
         expected = sum(btc_group) - min(btc_group)
         self.assertEqual(result['action'], 'none')
         self.assertAlmostEqual(result['crypto_reserve_pct'], round(expected, 4))
@@ -222,7 +223,7 @@ class CryptoReserveTest(unittest.TestCase):
         client = make_client(equity=100000, cash=15000, carry_market_value=60000,
                              position_symbols=('BTC/USD', 'ETH/USD', 'SOL/USD'))
         result = cash_carry.rebalance_idle_cash(client, sizing)
-        btc_group = [self._need(sizing['BTCTREND']), self._need(sizing['BTCMOM'])]
+        btc_group = [self._need(sizing['BTCTREND']), self._need(sizing['BTCMOM']), self._need(sizing['BTCGX'])]
         self.assertAlmostEqual(result['crypto_reserve_pct'],
                                round(sum(btc_group) - min(btc_group), 4))
 
@@ -236,7 +237,7 @@ class CryptoReserveTest(unittest.TestCase):
                              position_symbols=('BTCUSD',))
         client.submit_order.return_value = MagicMock(id='sell-1')
         result = cash_carry.rebalance_idle_cash(client, sizing)
-        btc_group = [self._need(sizing['BTCTREND']), self._need(sizing['BTCMOM'])]
+        btc_group = [self._need(sizing['BTCTREND']), self._need(sizing['BTCMOM']), self._need(sizing['BTCGX'])]
         eth_sol = self._need(sizing['ETHTREND']) + self._need(sizing['SOLTREND'])
         expected = sum(btc_group) - min(btc_group) + eth_sol
         self.assertEqual(result['action'], 'sold')
